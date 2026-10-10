@@ -11,6 +11,40 @@ const formatDate = (dateStr) => {
   return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 };
 
+// html2canvas can't parse modern CSS color functions (oklch/oklab/lab/lch/color-mix)
+// that Tailwind v4 and browsers can produce, so resolve any computed color using
+// one of those functions to rgba() and set it inline before capturing an element.
+const UNSUPPORTED_COLOR_FN = /\b(oklch|oklab|lab|lch|color-mix|color)\(/;
+const fixOklchColors = (element) => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  const colorToRgba = (color) => {
+    ctx.clearRect(0, 0, 1, 1);
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, 1, 1);
+    const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+    return `rgba(${r}, ${g}, ${b}, ${a / 255})`;
+  };
+
+  const propsToCheck = [
+    'color', 'backgroundColor', 'borderTopColor', 'borderRightColor',
+    'borderBottomColor', 'borderLeftColor', 'textDecorationColor', 'outlineColor',
+  ];
+
+  [element, ...Array.from(element.querySelectorAll('*'))].forEach((el) => {
+    const computedStyle = window.getComputedStyle(el);
+    propsToCheck.forEach((prop) => {
+      const val = computedStyle[prop];
+      if (val && UNSUPPORTED_COLOR_FN.test(val)) {
+        el.style[prop] = colorToRgba(val);
+      }
+    });
+  });
+};
+
 // ─── Email Tag Input ───────────────────────────────────────────────────────────
 const EmailTagInput = ({ label, tags, onTagsChange, placeholder }) => {
   const [inputValue, setInputValue] = useState('');
@@ -92,7 +126,8 @@ const ReportTable = forwardRef(({ entries, employees, isDateRange, id }, ref) =>
                   ))
                 ) : (Array.isArray(obs.screenshots) && obs.screenshots.length > 0 ? (
                   obs.screenshots.map((sc, si) => {
-                    const src = sc.key ? `${window.location.origin}/api/media/${sc.key}` : sc.data;
+                    const key = typeof sc === 'string' ? sc : (sc.key || sc.data);
+                    const src = key?.startsWith('data:') ? key : (key ? `${window.location.origin}/api/media/${key}` : null);
                     return src ? (
                       <a key={si} href={src} target="_blank" rel="noreferrer">
                         <img src={src} alt="" className="max-w-[80px] max-h-[80px] object-contain mx-auto mb-1" />
@@ -138,11 +173,12 @@ const SpecialObsPreview = ({ entries, date, onClose, employees }) => {
         if (!Array.isArray(obs.screenshots) || obs.screenshots.length === 0) return { ...obs, _loadedScreenshots: [] };
         const loaded = await Promise.all(obs.screenshots.map(async (sc) => {
           try {
-            if (sc.key) {
-              const res = await fetch(`/api/media/${sc.key}`);
-              if (res.ok) { const j = await res.json(); return j.data || null; }
-            }
-            return sc.data || null;
+            const key = typeof sc === 'string' ? sc : (sc.key || sc.data);
+            if (!key) return null;
+            if (key.startsWith('data:')) return key;
+            const res = await fetch(`/api/media/${key}`);
+            if (res.ok) { const j = await res.json(); return j.data || null; }
+            return null;
           } catch { return null; }
         }));
         return { ...obs, _loadedScreenshots: loaded.filter(Boolean) };
@@ -172,6 +208,9 @@ const SpecialObsPreview = ({ entries, date, onClose, employees }) => {
     }
     setIsGenerating(true);
     try {
+      // html2canvas can't parse Tailwind v4's oklch() colors, so resolve them to rgba() first.
+      fixOklchColors(pdfContentRef.current);
+
       const pdf = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
       const pageW = pdf.internal.pageSize.getWidth();
       const pageH = pdf.internal.pageSize.getHeight();
