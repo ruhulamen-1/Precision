@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%23ea580c'/%3E%3Ctext x='16' y='21' font-family='Arial, sans-serif' font-size='14' font-weight='900' fill='white' text-anchor='middle'%3EPr%3C/text%3E%3C/svg%3E" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Precision</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Merriweather:wght@700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://esm.sh/react-image-crop@11.0.6/dist/ReactCrop.css">
+    <!-- PDF Generation Libraries -->
+    <!-- New library for screen capture to PDF -->
+    <!-- CSV Parsing Library window.Papa-->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <style type="text/css">
+      * {
+        transition: color 0.2s ease-in-out, background-color 0.2s ease-in-out, border-color 0.2s ease-in-out, transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+      }
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      .fade-in {
+        animation: fadeIn 0.4s ease-in-out;
+      }
+       @keyframes fadeInDown {
+        from { opacity: 0; transform: translateY(-20px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      @keyframes fadeInUp {
+        from { opacity: 0; transform: translateY(20px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      .animate-fade-in-down {
+        animation: fadeInDown 0.2s ease-out forwards;
+      }
+      .animate-fade-in-up {
+        animation: fadeInUp 0.8s ease-out 0.2s forwards;
+        opacity: 0; /* Important to start hidden */
+      }
+      .ReactCrop__crop-selection {
+        border: 2px dashed white;
+      }
+      
+      /* Splash Screen & App Intro Animations */
+      @keyframes kenBurns {
+        0% { transform: scale(1.05); opacity: 0.8; }
+        100% { transform: scale(1.15); opacity: 1; }
+      }
+      @keyframes logoFadeIn {
+        from { opacity: 0; transform: scale(0.9); }
+        to { opacity: 1; transform: scale(1); }
+      }
+      @keyframes textFadeInUp {
+          from { opacity: 0; transform: translateY(15px); }
+          to { opacity: 1; transform: translateY(0); }
+      }
+      @keyframes lineDraw {
+          from { transform: scaleX(0); }
+          to { transform: scaleX(1); }
+      }
+      @keyframes fadeOut {
+          from { opacity: 1; }
+          to { opacity: 0; pointer-events: none; }
+      }
+      .splash-fade-out {
+          animation: fadeOut 0.5s ease-in-out forwards;
+      }
+      @keyframes slideInLeft {
+        from { transform: translateX(calc(-1 * var(--sidebar-width))); }
+        to { transform: translateX(0); }
+      }
+      .animate-ken-burns { animation: kenBurns 10s ease-out forwards; }
+      .animate-logo-fade-in { animation: logoFadeIn 1s ease-out 0.5s forwards; opacity: 0; }
+      .animate-text-fade-in-up { animation: textFadeInUp 0.8s ease-out forwards; opacity: 0; }
+      .animate-line-draw { animation: lineDraw 0.7s ease-out forwards; opacity: 0; }
+      .animate-slide-in-left { animation: slideInLeft 0.6s cubic-bezier(0.250, 0.460, 0.450, 0.940) forwards; }
+      .animate-header-fade-in-down { animation: fadeInDown 0.6s ease-out forwards; opacity: 0; }
+      .animate-card-fade-in-up { animation: fadeInUp 0.5s ease-out forwards; opacity: 0; }
+
+      /* Animation for radial progress bar */
+      @keyframes progress-draw {
+        from { stroke-dashoffset: 208; } /* Matches initial circumference */
+        to { stroke-dashoffset: var(--progress-offset); }
+      }
+      .animate-progress-draw {
+        animation: progress-draw 1.5s 0.5s cubic-bezier(0.65, 0, 0.35, 1) forwards;
+      }
+
+      /* Print specific styles */
+      @media print {
+        body * {
+          visibility: hidden;
+        }
+        .printable-area, .printable-area * {
+          visibility: visible;
+        }
+        .printable-area {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 100%;
+          margin: 0;
+          padding: 0;
+          border: none !important;
+          box-shadow: none !important;
+        }
+        .printable-area .overflow-auto {
+          overflow: visible !important;
+          height: auto !important;
+          max-height: none !important;
+          border: none !important;
+        }
+        .no-print {
+          display: none !important;
+        }
+        .avoid-page-break {
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
+      }
+      /* Fullscreen specific styles */
+      .fullscreen-container:fullscreen {
+        padding: 1.5rem;
+        display: flex;
+        flex-direction: column;
+        overflow-y: hidden; /* Let the inner container scroll */
+      }
+      .fullscreen-container:fullscreen .flex-grow {
+        flex-grow: 1;
+        overflow-y: auto; /* Enable vertical scroll on the table container */
+      }
+      
+      /* Custom styles for the scooped tab effect */
+      .scooped-tab::before {
+        content: '';
+        position: absolute;
+        bottom: 0;
+        left: -12px; /* Width of the scoop */
+        width: 12px;
+        height: 12px;
+        /* This creates the curve. The gradient goes from the bar color to transparent. */
+        background-image: radial-gradient(circle at 0 0, transparent 0, transparent 12px, white 12px);
+        z-index: 10;
+      }
+      .scooped-tab::after {
+        content: '';
+        position: absolute;
+        bottom: 0;
+        right: -12px; /* Width of the scoop */
+        width: 12px;
+        height: 12px;
+        background-image: radial-gradient(circle at 100% 0, transparent 0, transparent 12px, white 12px);
+        z-index: 10;
+      }
+      /* This pseudo element on the tab bar helps blend the scoop into the main content panel's border */
+      .scooped-tab-container::before {
+        content: '';
+        position: absolute;
+        bottom: -1px; /* Sits right on top of the main panel's border */
+        left: 0;
+        right: 0;
+        height: 1px;
+        background-color: white; /* Matches main content panel color */
+        z-index: 5;
+      }
+
+      @keyframes scaleIn {
+        from { opacity: 0; transform: scale(0.95); }
+        to   { opacity: 1; transform: scale(1); }
+      }
+      @keyframes slideInUp {
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+      @keyframes slideInDown {
+        from { opacity: 0; transform: translateY(-8px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+      .animate-scale-in    { animation: scaleIn    0.2s ease-out forwards; }
+      .animate-slide-in-up { animation: slideInUp  0.2s ease-out forwards; }
+      .animate-slide-in-down { animation: slideInDown 0.2s ease-out forwards; }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^18.3.1/",
+    "react": "https://esm.sh/react@^18.3.1",
+    "react-dom/": "https://esm.sh/react-dom@^18.3.1/",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.15.0",
+    "react-image-crop": "https://esm.sh/react-image-crop@^11.0.6",
+    "lodash": "https://aistudiocdn.com/lodash@^4.17.21",
+    "recharts": "https://esm.sh/recharts@^2.12.7",
+    "prop-types": "https://esm.sh/prop-types@^15.8.1",
+    "react-dom": "https://esm.sh/react-dom@^18.3.1"
+  }
+}
+</script>
+</head>
+  <body class="font-sans">
+    <div id="root">
+      <!-- Sophisticated HTML/CSS Loader for initial mount -->
+      <div id="initial-loader" style="position: fixed; inset: 0; background-color: #faf9f5; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 10000; font-family: 'Inter', system-ui, sans-serif;">
+        <div style="position: relative; width: 80px; height: 80px;">
+          <!-- Outer technical ring -->
+          <div style="position: absolute; inset: 0; border: 2px solid rgba(234, 88, 12, 0.1); border-radius: 50%;"></div>
+          <!-- Spinning technical segment -->
+          <div style="position: absolute; inset: 0; border: 3px solid transparent; border-top-color: #ea580c; border-radius: 50%; animation: spin 1s cubic-bezier(0.76, 0, 0.3, 1) infinite;"></div>
+          <!-- Inner pulsing core -->
+          <div style="position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; background-color: #ea580c; border-radius: 50%; transform: translate(-50%, -50%); animation: pulse 1.5s ease-in-out infinite;"></div>
+          <!-- Corner brackets -->
+          <div style="position: absolute; top: -5px; left: -5px; width: 12px; height: 12px; border-top: 2px solid #ea580c; border-left: 2px solid #ea580c;"></div>
+          <div style="position: absolute; top: -5px; right: -5px; width: 12px; height: 12px; border-top: 2px solid #ea580c; border-right: 2px solid #ea580c;"></div>
+          <div style="position: absolute; bottom: -5px; left: -5px; width: 12px; height: 12px; border-bottom: 2px solid #ea580c; border-left: 2px solid #ea580c;"></div>
+          <div style="position: absolute; bottom: -5px; right: -5px; width: 12px; height: 12px; border-bottom: 2px solid #ea580c; border-right: 2px solid #ea580c;"></div>
+        </div>
+        <div style="margin-top: 24px; text-transform: uppercase; letter-spacing: 0.15em; font-size: 10px; font-weight: 700; color: #64748b; animation: fadeText 2s ease-in-out infinite;">Initialising System</div>
+        <div style="margin-top: 8px; width: 120px; height: 2px; background-color: #e2e8f0; border-radius: 1px; overflow: hidden;">
+          <div style="width: 100%; height: 100%; background-color: #ea580c; animation: scan 2s linear infinite;"></div>
+        </div>
+      </div>
+      <style>
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+        @keyframes pulse { 0%, 100% { opacity: 0.5; transform: translate(-50%, -50%) scale(1); } 50% { opacity: 1; transform: translate(-50%, -50%) scale(1.5); } }
+        @keyframes scan { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+        @keyframes fadeText { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
+      </style>
+    </div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
