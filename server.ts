@@ -3589,7 +3589,7 @@ async function startServer() {
 
   apiRouter.put('/archive-data-verification/:id', async (req, res) => {
     const { id } = req.params;
-    const { check_status, check_date, check_time, checked_by, files_count, errors_count, remarks_on_errors, user_remarks, status, upload_date, upload_time, actor_name } = req.body;
+    const { file_name, data_type, submitted_by, check_status, check_date, check_time, checked_by, files_count, errors_count, remarks_on_errors, user_remarks, status, upload_date, upload_time, actor_name } = req.body;
     try {
       if (useMemoryStore || !pool) return res.status(501).json({ error: 'Not implemented in memory store' });
 
@@ -3598,9 +3598,19 @@ async function startServer() {
       if (currentRows.length === 0) return res.status(404).json({ error: 'Record not found' });
       const current = currentRows[0];
 
+      // Admin / Super Admin can edit every column (including file name, data type and entry owner)
+      let actorIsAdmin = false;
+      if (actor_name) {
+        const [actorRows]: any = await pool.query('SELECT role FROM users WHERE name = ? LIMIT 1', [actor_name]);
+        actorIsAdmin = actorRows.length > 0 && (actorRows[0].role === 'admin' || actorRows[0].role === 'super_admin');
+      }
+      const nextFileName = actorIsAdmin && file_name !== undefined ? file_name : current.file_name;
+      const nextDataType = actorIsAdmin && data_type !== undefined ? data_type : current.data_type;
+      const nextSubmittedBy = actorIsAdmin && submitted_by !== undefined ? submitted_by : current.submitted_by;
+
       await pool.query(
-        'UPDATE archive_data_verification SET check_status = ?, check_date = ?, check_time = ?, checked_by = ?, files_count = ?, errors_count = ?, remarks_on_errors = ?, user_remarks = ?, status = ?, upload_date = ?, upload_time = ? WHERE id = ?',
-        [check_status, check_date, check_time, checked_by, files_count, errors_count, remarks_on_errors, user_remarks !== undefined ? user_remarks : current.user_remarks, status || current.status, upload_date || current.upload_date, upload_time || current.upload_time, id]
+        'UPDATE archive_data_verification SET file_name = ?, data_type = ?, submitted_by = ?, check_status = ?, check_date = ?, check_time = ?, checked_by = ?, files_count = ?, errors_count = ?, remarks_on_errors = ?, user_remarks = ?, status = ?, upload_date = ?, upload_time = ? WHERE id = ?',
+        [nextFileName, nextDataType, nextSubmittedBy, check_status, check_date, check_time, checked_by, files_count, errors_count, remarks_on_errors, user_remarks !== undefined ? user_remarks : current.user_remarks, status || current.status, upload_date || current.upload_date, upload_time || current.upload_time, id]
       );
       
       // History logic: status change হলে নতুন entry, একই status এ remarks বদলালে শেষ entry update

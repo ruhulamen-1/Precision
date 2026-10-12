@@ -371,7 +371,9 @@ const ArchiveDataVerification: React.FC<Props> = ({
       }
 
       const isPending = originalRecord?.check_status === "Pending";
-      if (isPending && !isSuperAdmin) {
+      // Super Admin and Admin can edit every column of the entry
+      const canEditAllColumns = isSuperAdmin || isAdmin;
+      if (isPending && !canEditAllColumns) {
         finalFields.file_name =
           originalRecord?.file_name || finalFields.file_name;
         finalFields.upload_date =
@@ -387,7 +389,7 @@ const ArchiveDataVerification: React.FC<Props> = ({
         finalFields.submitted_by =
           originalRecord?.submitted_by || finalFields.submitted_by;
       } else {
-        if (!isSuperAdmin) {
+        if (!canEditAllColumns) {
           finalFields.submitted_by =
             originalRecord?.submitted_by || finalFields.submitted_by;
         }
