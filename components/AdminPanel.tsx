@@ -746,7 +746,7 @@ const EditPermissionsPage: React.FC<{
 
   const handleToggle = (
     key: keyof Permissions,
-    type: "view" | "edit" | "audit",
+    type: "view" | "edit" | "audit" | "editAll",
   ) => {
     setPermissions((prev) => {
       if (!prev) return prev;
@@ -884,6 +884,7 @@ const EditPermissionsPage: React.FC<{
           label: "Archive Data Verification",
           hasEdit: true,
           hasAudit: true,
+          hasEditAll: true,
         },
         {
           key: "cctvFootageCheckReports",
@@ -1084,6 +1085,14 @@ const EditPermissionsPage: React.FC<{
                           isOn={!!p?.audit}
                           onClick={() => handleToggle(item.key as keyof Permissions, "audit")}
                           color="bg-violet-400 dark:bg-violet-500"
+                        />
+                      )}
+                      {(item as any).hasEditAll && (
+                        <PermChip
+                          label="Edit All"
+                          isOn={!!p?.editAll}
+                          onClick={() => handleToggle(item.key as keyof Permissions, "editAll")}
+                          color="bg-rose-400 dark:bg-rose-500"
                         />
                       )}
                     </div>

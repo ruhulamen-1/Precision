@@ -24,7 +24,15 @@ export const getEffectivePermissions = (user: User): Permissions => {
         
         allKeys.forEach(key => {
             // For special keys that need audit
-            if (['archiveDataVerification', 'fixedAssetGPVerification', 'rubbishVerification'].includes(key)) {
+            if (key === 'archiveDataVerification') {
+                // editAll is a per-user toggle; only super admin gets it implicitly
+                fullPermissions[key] = {
+                    view: true,
+                    edit: true,
+                    audit: true,
+                    editAll: role === 'super_admin' || !!permissions?.archiveDataVerification?.editAll,
+                };
+            } else if (['fixedAssetGPVerification', 'rubbishVerification'].includes(key)) {
                 fullPermissions[key] = { view: true, edit: true, audit: true };
             } else if (['dashboard', 'lastVisitedProjects', 'projectCasesList', 'adminPanel', 'materialReceiveList', 
                          'reportMailer', 'employeeProjectVisit_import', 'employeeProjectVisit_template', 

@@ -56,7 +56,7 @@ export interface Permissions {
   ssvDutyAnalysis: { view: boolean; edit: boolean };
   projectVisit: { view: boolean; edit: boolean };
   reportMailer: { view: boolean };
-  archiveDataVerification: { view: boolean; edit: boolean; audit: boolean };
+  archiveDataVerification: { view: boolean; edit: boolean; audit: boolean; editAll?: boolean };
   cctvFootageCheckReports: { view: boolean; edit: boolean };
   fixedAssetGPVerification: { view: boolean; edit: boolean; audit: boolean };
   rubbishVerification: { view: boolean; edit: boolean; audit: boolean };

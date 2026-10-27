@@ -54,7 +54,7 @@ export interface RecordsTableProps {
   allUsers: UserType[];
   dataTypeOptions: DataTypeOption[];
   isAdding: boolean;
-  advPerms: { view: boolean; edit: boolean; audit: boolean };
+  advPerms: { view: boolean; edit: boolean; audit: boolean; editAll?: boolean };
   onAdd: (record: any) => Promise<void>;
   onUpdate: (id: number, fields: EditFields) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
@@ -91,6 +91,8 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
 }) => {
   const isAdmin = currentUser?.role === USER_ROLE.ADMIN;
   const isSuperAdmin = currentUser?.role === USER_ROLE.SUPER_ADMIN;
+  // Per-user "Edit All" toggle (or super admin): every column of every row is editable
+  const fullEdit = isSuperAdmin || !!advPerms.editAll;
 
   // Deduplicate to prevent React key warnings (DB may return duplicate rows)
   const dedupedUsers = useMemo(() => {
@@ -192,7 +194,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
       const isAuditUser = advPerms.audit && !isAdmin && !isSuperAdmin;
       const matchesGlobal =
         (isAdmin ||
-          isSuperAdmin ||
+          fullEdit ||
           r.submitted_by === currentUser?.name ||
           (isAuditUser && r.checked_by === currentUser?.name) ||
           (isAuditUser && (!r.checked_by || r.checked_by.trim() === ""))) &&
@@ -232,6 +234,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
     records,
     isAdmin,
     isSuperAdmin,
+    fullEdit,
     currentUser,
     searchQuery,
     typeFilter,
@@ -426,7 +429,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
     // Guard: admin অন্য কেউর assigned entry edit করতে পারবে না
     const hasCheckedBy = !!(record.checked_by && record.checked_by.trim() !== "");
     const isAssignedAuditor = hasCheckedBy && record.checked_by === currentUser?.name;
-    if (isAdmin && hasCheckedBy && !isAssignedAuditor && !isSuperAdmin) return;
+    if (isAdmin && hasCheckedBy && !isAssignedAuditor && !fullEdit) return;
     setEditId(record.id);
     setEditFields({
       file_name: record.file_name,
@@ -902,7 +905,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                       <div className="space-y-1">
                         <div className="flex items-center gap-2">
                           {editId === r.id &&
-                          (isSuperAdmin ||
+                          (fullEdit ||
                             r.check_status !== CHECK_STATUS.PENDING) ? (
                             <input
                               type="text"
@@ -922,7 +925,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                           )}
                           <div className="h-1 w-1 rounded-full bg-slate-300" />
                           {editId === r.id &&
-                          (isSuperAdmin ||
+                          (fullEdit ||
                             r.check_status !== CHECK_STATUS.PENDING) ? (
                             <input
                               type="date"
@@ -944,7 +947,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                         <div className="flex items-center gap-2 text-xs text-slate-400 dark:text-slate-500 font-bold uppercase tracking-wider">
                           <Clock className="h-3 w-3" />
                           {editId === r.id &&
-                          (isSuperAdmin ||
+                          (fullEdit ||
                             r.check_status !== CHECK_STATUS.PENDING) ? (
                             <input
                               type="time"
@@ -963,7 +966,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                         </div>
                         <div className="pt-1">
                           {editId === r.id &&
-                          (isSuperAdmin ||
+                          (fullEdit ||
                             r.check_status !== CHECK_STATUS.PENDING) ? (
                             <select
                               value={editFields.data_type}
@@ -993,7 +996,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                     </td>
                     <td className="px-6 py-6 font-mono text-xs font-bold text-slate-500 dark:text-slate-400">
                       {editId === r.id &&
-                      (isSuperAdmin ||
+                      (fullEdit ||
                         r.check_status !== CHECK_STATUS.PENDING) ? (
                         <input
                           type="text"
@@ -1038,11 +1041,11 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                               }
                               disabled={
                                 !(
-                                  isSuperAdmin ||
+                                  fullEdit ||
                                   r.check_status !== CHECK_STATUS.PENDING
                                 )
                               }
-                              className={`w-full px-2 py-1 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-bold outline-none focus:border-indigo-500 ${!(isSuperAdmin || r.check_status !== CHECK_STATUS.PENDING) ? "bg-slate-50 dark:bg-slate-800/50 text-slate-400 dark:text-slate-500 cursor-not-allowed" : "bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-50"}`}
+                              className={`w-full px-2 py-1 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-bold outline-none focus:border-indigo-500 ${!(fullEdit || r.check_status !== CHECK_STATUS.PENDING) ? "bg-slate-50 dark:bg-slate-800/50 text-slate-400 dark:text-slate-500 cursor-not-allowed" : "bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-50"}`}
                             >
                               <option value={UPLOAD_STATUS.NEW_UPLOAD}>
                                 New Upload
@@ -1051,7 +1054,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                                 Old Upload
                               </option>
                             </select>
-                            {(isSuperAdmin ||
+                            {(fullEdit ||
                               r.check_status !== CHECK_STATUS.PENDING) && (
                               <input
                                 type="date"
@@ -1077,7 +1080,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                     <td className="px-6 py-6">
                       <div className="flex flex-col items-center">
                         {editId === r.id &&
-                        (isSuperAdmin ||
+                        (fullEdit ||
                           r.check_status !== CHECK_STATUS.PENDING) ? (
                           <input
                             type="number"
@@ -1117,7 +1120,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                               }
                               disabled={
                                 !(
-                                  isSuperAdmin ||
+                                  fullEdit ||
                                   !r.checked_by ||
                                   r.checked_by.trim() === "" ||
                                   r.checked_by === currentUser?.name
@@ -1125,7 +1128,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                               }
                               className={`w-20 px-3 py-2 border rounded-xl text-center text-sm font-black outline-none ${
                                 !(
-                                  isSuperAdmin ||
+                                  fullEdit ||
                                   !r.checked_by ||
                                   r.checked_by.trim() === "" ||
                                   r.checked_by === currentUser?.name
@@ -1151,7 +1154,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                               }}
                               className="w-20 px-2 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-black uppercase outline-none focus:border-indigo-500"
                             >
-                              {isSuperAdmin ||
+                              {fullEdit ||
                               !r.checked_by ||
                               r.checked_by.trim() === "" ||
                               r.checked_by === currentUser?.name ? (
@@ -1259,7 +1262,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                               Audit Remarks:
                             </span>
                             {editId === r.id &&
-                            (isSuperAdmin ||
+                            (fullEdit ||
                               !r.checked_by ||
                               r.checked_by.trim() === "" ||
                               r.checked_by === currentUser?.name) ? (
@@ -1287,16 +1290,17 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
 
                           {r.user_remarks ||
                           (editId === r.id &&
-                            !isAdmin &&
-                            (r.check_status === CHECK_STATUS.RETURNED ||
-                              r.check_status === CHECK_STATUS.ON_HOLD ||
-                              editFields.check_status ===
-                                CHECK_STATUS.RE_AUDIT)) ? (
+                            (fullEdit ||
+                              (!isAdmin &&
+                                (r.check_status === CHECK_STATUS.RETURNED ||
+                                  r.check_status === CHECK_STATUS.ON_HOLD ||
+                                  editFields.check_status ===
+                                    CHECK_STATUS.RE_AUDIT)))) ? (
                             <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
                               <span className="font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest text-[8px] block mb-1">
                                 User Remarks:
                               </span>
-                              {editId === r.id && !isAdmin ? (
+                              {editId === r.id && (!isAdmin || fullEdit) ? (
                                 <textarea
                                   value={editFields.user_remarks || ""}
                                   onChange={(e) =>
@@ -1352,7 +1356,7 @@ export const RecordsTable: React.FC<RecordsTableProps> = ({
                               // Admin: checked_by অন্য কেউ থাকলে শুধু Super Admin edit করতে পারবে
                               const isAdminCanEdit = isAdmin && (!hasCheckedBy || isAssignedAuditor);
                               return (
-                                isSuperAdmin ||
+                                fullEdit ||
                                 isAdminCanEdit ||
                                 (isOwner && isReturnedOrOnHold) ||
                                 (!isOwner && isAssignedAuditor) ||

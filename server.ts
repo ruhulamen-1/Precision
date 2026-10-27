@@ -3589,7 +3589,7 @@ async function startServer() {
 
   apiRouter.put('/archive-data-verification/:id', async (req, res) => {
     const { id } = req.params;
-    const { check_status, check_date, check_time, checked_by, files_count, errors_count, remarks_on_errors, user_remarks, status, upload_date, upload_time, actor_name } = req.body;
+    const { check_status, check_date, check_time, checked_by, files_count, errors_count, remarks_on_errors, user_remarks, status, upload_date, upload_time, actor_name, file_name, data_type, submitted_by } = req.body;
     try {
       if (useMemoryStore || !pool) return res.status(501).json({ error: 'Not implemented in memory store' });
 
@@ -3599,8 +3599,8 @@ async function startServer() {
       const current = currentRows[0];
 
       await pool.query(
-        'UPDATE archive_data_verification SET check_status = ?, check_date = ?, check_time = ?, checked_by = ?, files_count = ?, errors_count = ?, remarks_on_errors = ?, user_remarks = ?, status = ?, upload_date = ?, upload_time = ? WHERE id = ?',
-        [check_status, check_date, check_time, checked_by, files_count, errors_count, remarks_on_errors, user_remarks !== undefined ? user_remarks : current.user_remarks, status || current.status, upload_date || current.upload_date, upload_time || current.upload_time, id]
+        'UPDATE archive_data_verification SET check_status = ?, check_date = ?, check_time = ?, checked_by = ?, files_count = ?, errors_count = ?, remarks_on_errors = ?, user_remarks = ?, status = ?, upload_date = ?, upload_time = ?, file_name = ?, data_type = ?, submitted_by = ? WHERE id = ?',
+        [check_status, check_date, check_time, checked_by, files_count, errors_count, remarks_on_errors, user_remarks !== undefined ? user_remarks : current.user_remarks, status || current.status, upload_date || current.upload_date, upload_time || current.upload_time, file_name || current.file_name, data_type || current.data_type, submitted_by || current.submitted_by, id]
       );
       
       // History logic: status change হলে নতুন entry, একই status এ remarks বদলালে শেষ entry update

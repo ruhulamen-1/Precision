@@ -66,6 +66,7 @@ const ArchiveDataVerification: React.FC<Props> = ({
         view: true,
         edit: true,
         audit: false,
+        editAll: false,
       },
     [currentUser],
   );
@@ -290,6 +291,8 @@ const ArchiveDataVerification: React.FC<Props> = ({
 
       const isSuperAdmin = currentUser?.role === "super_admin";
       const isAdmin = currentUser?.role === "admin";
+      // Per-user "Edit All" toggle: full edit on every column/row, like a super admin (minus delete)
+      const hasFullEdit = isSuperAdmin || !!advPerms.editAll;
       const hasCheckedBy =
         originalRecord?.checked_by && originalRecord.checked_by.trim() !== "";
       const isAssignedAuditor =
@@ -303,6 +306,7 @@ const ArchiveDataVerification: React.FC<Props> = ({
       // Audit: only unassigned files that are not own
       const canAudit = hasAuditPerm && !hasCheckedBy && !isOwner;
       const canUpdate =
+        hasFullEdit ||
         isSuperAdmin ||
         isAdmin ||
         (isOwner && isReturnedOrOnHold) || // owner can always fix own Returned/On Hold (even if checked_by exists)
@@ -329,17 +333,17 @@ const ArchiveDataVerification: React.FC<Props> = ({
       finalFields.check_date = getLocalDateString();
       finalFields.check_time = getLocalTimeString();
 
-      const isAuditUser = advPerms.audit && !isSuperAdmin && !isAdmin;
+      const isAuditUser = advPerms.audit && !hasFullEdit && !isAdmin;
       // Owner নিজের Returned/On Hold file fix করলে সবসময় Re-Audit — audit permission override করবে না
       const isOwnerFixing =
         isOwner &&
-        !isSuperAdmin &&
+        !hasFullEdit &&
         !isAdmin &&
         (originalRecord?.check_status === "Returned" ||
           originalRecord?.check_status === "On Hold");
       if (
         isOwnerFixing ||
-        (!isSuperAdmin &&
+        (!hasFullEdit &&
           !isAdmin &&
           !isAuditUser &&
           (originalRecord?.check_status === "Returned" ||
@@ -371,7 +375,7 @@ const ArchiveDataVerification: React.FC<Props> = ({
       }
 
       const isPending = originalRecord?.check_status === "Pending";
-      if (isPending && !isSuperAdmin) {
+      if (isPending && !hasFullEdit) {
         finalFields.file_name =
           originalRecord?.file_name || finalFields.file_name;
         finalFields.upload_date =
@@ -387,7 +391,7 @@ const ArchiveDataVerification: React.FC<Props> = ({
         finalFields.submitted_by =
           originalRecord?.submitted_by || finalFields.submitted_by;
       } else {
-        if (!isSuperAdmin) {
+        if (!hasFullEdit) {
           finalFields.submitted_by =
             originalRecord?.submitted_by || finalFields.submitted_by;
         }
