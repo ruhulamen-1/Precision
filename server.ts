@@ -3600,7 +3600,7 @@ async function startServer() {
 
       await pool.query(
         'UPDATE archive_data_verification SET check_status = ?, check_date = ?, check_time = ?, checked_by = ?, files_count = ?, errors_count = ?, remarks_on_errors = ?, user_remarks = ?, status = ?, upload_date = ?, upload_time = ?, file_name = ?, data_type = ?, submitted_by = ? WHERE id = ?',
-        [check_status, check_date, check_time, checked_by, files_count, errors_count, remarks_on_errors, user_remarks !== undefined ? user_remarks : current.user_remarks, status || current.status, upload_date || current.upload_date, upload_time || current.upload_time, file_name || current.file_name, data_type || current.data_type, submitted_by || current.submitted_by, id]
+        [check_status, check_date ? String(check_date).slice(0, 10) : check_date, check_time, checked_by, files_count, errors_count, remarks_on_errors, user_remarks !== undefined ? user_remarks : current.user_remarks, status || current.status, (upload_date ? String(upload_date).slice(0, 10) : current.upload_date), upload_time || current.upload_time, file_name || current.file_name, data_type || current.data_type, submitted_by || current.submitted_by, id]
       );
       
       // History logic: status change হলে নতুন entry, একই status এ remarks বদলালে শেষ entry update

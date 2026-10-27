@@ -155,6 +155,8 @@ const CasualBatchReportGenerator: React.FC<CasualBatchReportGeneratorProps> = ({
         logo={logo}
         employees={employees}
         onClose={() => setViewMode('list')}
+        isBatchMode={false}
+        onReady={() => {}}
         departmentName={report.department}
         isAdmin={isAdmin}
         allProfiles={allProfiles}

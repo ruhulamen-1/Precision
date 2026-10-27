@@ -1701,7 +1701,7 @@ const AllDepartmentSummary: React.FC<AllDepartmentSummaryProps> = ({
       return changes.length > 0 ? _.mean(changes) : null;
     };
 
-    return Object.entries(visitsByDept).map(([department, deptVisits]) => {
+    return (Object.entries(visitsByDept) as [string, typeof visits][]).map(([department, deptVisits]) => {
       const monthly: DepartmentMonthlySummaryRow["monthly"] = {};
       const visitSeries: number[] = [];
       const durationSeries: number[] = [];
