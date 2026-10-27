@@ -4,6 +4,12 @@ import _ from "lodash";
 import Papa from "papaparse";
 import { parseCSVRobustly } from "../utils/csvUtils";
 import { ITAssignedIssue, ITResponseTimelineTab, User } from "../types";
+import {
+  analyzeIncidents,
+  dedupeIssues,
+  hydrateITIssue,
+  summarizePreviousMonth,
+} from "../utils/itAnalytics";
 import ITRecordsTab from "./ITRecordsTab";
 import ITAnalysisTab from "./ITAnalysisTab";
 import DeviceCredentialsTab from "./DeviceCredentialsTab";
@@ -89,6 +95,34 @@ const parseDateFromCSV = (dateStr: string): Date | null => {
   return null;
 };
 
+/**
+ * Parses "YYYY-MM-DD HH:MM", "DD-MMM-YYYY HH:MM" or a bare date (→ 00:00) into a UTC-based Date.
+ * Wall-clock values are kept as written (no timezone conversion), like the date-only columns.
+ */
+const parseDateTimeFromCSV = (value: string): Date | null => {
+  if (!value || typeof value !== "string") return null;
+  const m = value.trim().match(/^(\S+?)(?:[T\s]+(\d{1,2}):(\d{2}))?$/);
+  if (!m) return null;
+  const date = parseDateFromCSV(m[1]);
+  if (!date) return null;
+  if (m[2] === undefined) return date;
+  const h = parseInt(m[2], 10);
+  const min = parseInt(m[3], 10);
+  if (h > 23 || min > 59) return null;
+  return new Date(date.getTime() + (h * 60 + min) * 60_000);
+};
+
+const OPTIONAL_HEADERS = [
+  "Reported Time",
+  "Acknowledged At",
+  "Resolved At",
+  "Category",
+  "Priority",
+  "Root Cause",
+  "Resolved By",
+  "Device Count",
+] as const;
+
 interface ITResponseTimelineProps {
   currentUser: User;
   assignedIssues: ITAssignedIssue[];
@@ -113,212 +147,44 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const filteredIssues = useMemo(() => {
-    return assignedIssues.filter((assignedIssue) => {
-      const statusMatch =
-        !statusFilter || assignedIssue.status === statusFilter;
-      const searchMatch =
-        !searchQuery ||
-        assignedIssue.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        assignedIssue.issue.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        assignedIssue.projectName
-          .toLowerCase()
-          .includes(searchQuery.toLowerCase()) ||
-        assignedIssue.zone.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        assignedIssue.assignedTo
-          .toLowerCase()
-          .includes(searchQuery.toLowerCase());
+  // The log is de-duplicated once up-front so every view (records, KPIs) agrees.
+  const cleanIssues = useMemo(() => dedupeIssues(assignedIssues).rows, [assignedIssues]);
 
+  const rowMatches = useMemo(() => {
+    const q = searchQuery.toLowerCase();
+    return (row: ITAssignedIssue) =>
+      (!statusFilter || row.status === statusFilter) &&
+      (!q ||
+        row.id.toLowerCase().includes(q) ||
+        row.issue.toLowerCase().includes(q) ||
+        row.projectName.toLowerCase().includes(q) ||
+        row.zone.toLowerCase().includes(q) ||
+        row.assignedTo.toLowerCase().includes(q));
+  }, [statusFilter, searchQuery]);
+
+  const filteredIssues = useMemo(() => {
+    return cleanIssues.filter((assignedIssue) => {
       let monthMatch = true;
       if (monthFilter !== "all") {
         const issueDate = assignedIssue.reportedAt;
         const issueMonth = `${issueDate.getUTCFullYear()}-${String(issueDate.getUTCMonth() + 1).padStart(2, "0")}`;
         monthMatch = issueMonth === monthFilter;
       }
-
-      return statusMatch && searchMatch && monthMatch;
+      return rowMatches(assignedIssue) && monthMatch;
     });
-  }, [assignedIssues, statusFilter, searchQuery, monthFilter]);
+  }, [cleanIssues, rowMatches, monthFilter]);
 
-  const analysisData = useMemo(() => {
-    if (filteredIssues.length === 0) return null;
+  // Incident-based analysis. It deliberately reads the *whole* log (not only the selected
+  // month) so an issue that runs across a month boundary keeps its real start and end.
+  const analysisData = useMemo(
+    () => analyzeIncidents(assignedIssues, { month: monthFilter, rowMatches }),
+    [assignedIssues, monthFilter, rowMatches],
+  );
 
-    const mostRecentDateInDataset = _.maxBy(
-      filteredIssues,
-      "reportedAt",
-    )?.reportedAt;
-
-    // Build a set of issue+project keys that appear in months AFTER the selected month.
-    // If an "Ongoing" issue has NO record in any future month, it was actually resolved
-    // by end of the selected month — we treat it as Resolved.
-    const nextMonthIssueKeys = new Set(
-      assignedIssues
-        .filter((i) => {
-          const m = `${i.reportedAt.getUTCFullYear()}-${String(i.reportedAt.getUTCMonth() + 1).padStart(2, "0")}`;
-          return m > monthFilter;
-        })
-        .map((i) => `${i.issue}|${i.projectName}`)
-    );
-    // Last calendar day of the selected month (used as implied resolution date)
-    const [_selYear, _selMon] = monthFilter.split("-").map(Number);
-    const lastDayOfMonth = new Date(Date.UTC(_selYear, _selMon, 0)); // day=0 trick
-
-    const zoneDetails = _.chain(filteredIssues)
-      .groupBy("zone")
-      .map((issuesInZone, zoneName) => {
-        return {
-          zone: zoneName,
-          count: issuesInZone.length,
-          projects: _.uniq(
-            issuesInZone.map((issue) => issue.projectName),
-          ).sort(),
-        };
-      })
-      .orderBy(["count"], ["desc"])
-      .value();
-
-    const statusSummary = _.countBy(filteredIssues, "status");
-    const projectSummary = _.countBy(filteredIssues, "projectName");
-
-    // New calculation for top 5 common problems with details
-    const issuesByDescription = _.groupBy(filteredIssues, "issue");
-    const top5CommonProblems = _.chain(Object.entries(issuesByDescription))
-      .map(([issue, issues]) => {
-        const latestIssue = _.maxBy(issues, "reportedAt");
-        const latestProjectName = latestIssue?.projectName || "N/A";
-        const projectSpecificCount = issues.filter(
-          (i) => i.projectName === latestProjectName,
-        ).length;
-        return {
-          issue: issue,
-          count: issues.length,
-          latestProject: latestProjectName,
-          latestDate: latestIssue?.reportedAt || null,
-          projectSpecificCount: projectSpecificCount,
-        };
-      })
-      .orderBy(["count"], ["desc"])
-      .slice(0, 5)
-      .value();
-
-    const issueTimelineData = _.chain(filteredIssues)
-      .groupBy((t) => `${t.issue}|${t.projectName}`)
-      .map((groupedIssues, issueAndProject) => {
-        const [issue, projectName] = issueAndProject.split("|");
-
-        const uniqueDates = _.uniqBy(groupedIssues, (t) =>
-          t.reportedAt.getTime(),
-        )
-          .map((t) => t.reportedAt)
-          .sort((a, b) => a.getTime() - b.getTime());
-
-        const timelines: { start: Date; end: Date }[] = [];
-        let totalActiveDays = 0;
-
-        if (uniqueDates.length > 0) {
-          let currentTimeline = { start: uniqueDates[0], end: uniqueDates[0] };
-          for (let i = 1; i < uniqueDates.length; i++) {
-            const prevDate = uniqueDates[i - 1];
-            const currentDate = uniqueDates[i];
-            const diffDays =
-              (currentDate.getTime() - prevDate.getTime()) / (1000 * 3600 * 24);
-            if (diffDays === 1) {
-              currentTimeline.end = currentDate;
-            } else {
-              timelines.push(currentTimeline);
-              currentTimeline = { start: currentDate, end: currentDate };
-            }
-          }
-          timelines.push(currentTimeline);
-          totalActiveDays = timelines.reduce(
-            (sum, tl) =>
-              sum +
-              ((tl.end.getTime() - tl.start.getTime()) / (1000 * 3600 * 24) +
-                1),
-            0,
-          );
-        }
-
-        let solutionDate: Date | string | null = null;
-        let resolutionTimeInDays: number | null = null;
-
-        if (timelines.length > 0 && mostRecentDateInDataset) {
-          const latestTimeline = timelines[timelines.length - 1];
-          const isOngoing =
-            latestTimeline.end.getTime() === mostRecentDateInDataset.getTime();
-
-          if (isOngoing) {
-            solutionDate = "Ongoing";
-            resolutionTimeInDays =
-              Math.ceil(
-                (mostRecentDateInDataset.getTime() -
-                  latestTimeline.start.getTime()) /
-                  (1000 * 3600 * 24),
-              ) + 1;
-          } else {
-            const resolvedDate = new Date(latestTimeline.end.getTime());
-            resolvedDate.setUTCDate(resolvedDate.getUTCDate() + 1);
-            solutionDate = resolvedDate;
-            resolutionTimeInDays = Math.ceil(
-              (solutionDate.getTime() - latestTimeline.start.getTime()) /
-                (1000 * 3600 * 24),
-            );
-          }
-        }
-
-        return {
-          issue,
-          projectName,
-          count: groupedIssues.length,
-          timelines,
-          totalActiveDays,
-          firstReported: uniqueDates.length > 0 ? uniqueDates[0] : null,
-          lastReported:
-            uniqueDates.length > 0 ? uniqueDates[uniqueDates.length - 1] : null,
-          solutionDate,
-          resolutionTimeInDays,
-        };
-      })
-      .orderBy("count", "desc")
-      .value();
-
-    // --- New Summary Metrics ---
-    const resolvedIssues = issueTimelineData.filter(
-      (t) =>
-        typeof t.resolutionTimeInDays === "number" &&
-        t.solutionDate !== "Ongoing",
-    );
-    const averageResolutionTime =
-      resolvedIssues.length > 0
-        ? _.meanBy(resolvedIssues, "resolutionTimeInDays")
-        : 0;
-
-    const ongoingIssues = issueTimelineData.filter(
-      (t) => t.solutionDate === "Ongoing",
-    );
-    const longestOpenIssue = _.maxBy(ongoingIssues, "resolutionTimeInDays");
-
-    const mostFrequentIssue =
-      issueTimelineData.length > 0 ? issueTimelineData[0] : null;
-
-    return {
-      totalAssignedIssues: filteredIssues.length,
-      issueCount: statusSummary["Issue"] || 0,
-      offlineCount: statusSummary["Offline"] || 0,
-      zoneSummary: zoneDetails,
-      projectSummary: _.orderBy(
-        Object.entries(projectSummary),
-        ([_project, count]) => count,
-        ["desc"],
-      ),
-      top5CommonProblems,
-      issueTimeline: issueTimelineData,
-      // New summary data
-      averageResolutionTime,
-      longestOpenIssue,
-      mostFrequentIssue,
-    };
-  }, [filteredIssues]);
+  const prevMonthSummary = useMemo(
+    () => summarizePreviousMonth(assignedIssues, monthFilter, rowMatches),
+    [assignedIssues, monthFilter, rowMatches],
+  );
 
   const handleDownloadTemplate = () => {
     const headers = [
@@ -329,6 +195,7 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
       "Status",
       "Assigned Issue",
       "Assigned To",
+      ...OPTIONAL_HEADERS,
     ];
     const exampleData = [
       [
@@ -339,6 +206,14 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
         "Issue",
         "Cannot access shared folder",
         "IT Support",
+        "09:15",
+        "01-Sep-2025 10:00",
+        "02-Sep-2025 16:30",
+        "Network",
+        "High",
+        "Switch port fault",
+        "IT Support",
+        "48",
       ],
       [
         "IT-102",
@@ -348,6 +223,14 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
         "Offline",
         "Outlook is crashing",
         "IT Support",
+        "",
+        "",
+        "",
+        "Software",
+        "Low",
+        "",
+        "",
+        "",
       ],
     ];
     const csv = Papa.unparse({ fields: headers, data: exampleData });
@@ -360,7 +243,8 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
     link.click();
     document.body.removeChild(link);
     setFeedback({
-      message: "Template downloaded successfully!",
+      message:
+        "Template downloaded. The first 7 columns are required; the rest (Reported Time … Device Count) are optional but unlock response-time, SLA-style and per-device metrics.",
       type: "success",
     });
   };
@@ -399,17 +283,19 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
         const newAssignedIssues: ITAssignedIssue[] = [];
         let errorOccurred = false;
         const validStatuses: ITAssignedIssue["status"][] = ["Issue", "Offline"];
+        const priorities = ["High", "Medium", "Low"] as const;
+        const fail = (message: string) => {
+          setFeedback({ message, type: "error" });
+          errorOccurred = true;
+        };
 
         for (const [index, row] of results.data.entries()) {
           if (errorOccurred) break;
+          const rowNo = index + 2;
 
           for (const field of requiredHeaders) {
             if (!row[field]) {
-              setFeedback({
-                message: `Row ${index + 2}: Missing data for required field "${field}".`,
-                type: "error",
-              });
-              errorOccurred = true;
+              fail(`Row ${rowNo}: Missing data for required field "${field}".`);
               break;
             }
           }
@@ -417,22 +303,67 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
 
           const reportedAt = parseDateFromCSV(row["Date"]);
           if (!reportedAt) {
-            setFeedback({
-              message: `Row ${index + 2}: Invalid or unsupported 'Date' format: "${row["Date"]}".`,
-              type: "error",
-            });
-            errorOccurred = true;
+            fail(`Row ${rowNo}: Invalid or unsupported 'Date' format: "${row["Date"]}".`);
             continue;
           }
 
           const status = row["Status"];
           if (!validStatuses.includes(status)) {
-            setFeedback({
-              message: `Row ${index + 2}: Invalid status "${status}". Must be one of: Issue, Offline.`,
-              type: "error",
-            });
-            errorOccurred = true;
+            fail(`Row ${rowNo}: Invalid status "${status}". Must be one of: Issue, Offline.`);
             continue;
+          }
+
+          // ── optional lifecycle columns ──
+          const get = (h: string): string => (row[h] ?? "").toString().trim();
+
+          const reportedTime = get("Reported Time");
+          if (reportedTime && !/^([01]?\d|2[0-3]):[0-5]\d$/.test(reportedTime)) {
+            fail(`Row ${rowNo}: 'Reported Time' must be HH:MM (24h), got "${reportedTime}".`);
+            continue;
+          }
+
+          let acknowledgedAt: Date | null = null;
+          if (get("Acknowledged At")) {
+            acknowledgedAt = parseDateTimeFromCSV(get("Acknowledged At"));
+            if (!acknowledgedAt) {
+              fail(`Row ${rowNo}: Invalid 'Acknowledged At' value: "${get("Acknowledged At")}".`);
+              continue;
+            }
+            if (acknowledgedAt.getTime() < reportedAt.getTime()) {
+              fail(`Row ${rowNo}: 'Acknowledged At' is earlier than 'Date'.`);
+              continue;
+            }
+          }
+
+          let resolvedAt: Date | null = null;
+          if (get("Resolved At")) {
+            resolvedAt = parseDateTimeFromCSV(get("Resolved At"));
+            if (!resolvedAt) {
+              fail(`Row ${rowNo}: Invalid 'Resolved At' value: "${get("Resolved At")}".`);
+              continue;
+            }
+            if (resolvedAt.getTime() < reportedAt.getTime()) {
+              fail(`Row ${rowNo}: 'Resolved At' is earlier than 'Date'.`);
+              continue;
+            }
+          }
+
+          let priority: ITAssignedIssue["priority"] = null;
+          if (get("Priority")) {
+            priority = priorities.find((p) => p.toLowerCase() === get("Priority").toLowerCase()) ?? null;
+            if (!priority) {
+              fail(`Row ${rowNo}: Invalid 'Priority' "${get("Priority")}". Must be High, Medium or Low.`);
+              continue;
+            }
+          }
+
+          let deviceCount: number | null = null;
+          if (get("Device Count")) {
+            deviceCount = Number(get("Device Count"));
+            if (!Number.isInteger(deviceCount) || deviceCount < 0) {
+              fail(`Row ${rowNo}: 'Device Count' must be a whole number, got "${get("Device Count")}".`);
+              continue;
+            }
           }
 
           newAssignedIssues.push({
@@ -443,6 +374,14 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
             status,
             projectName: row["Project Name"],
             zone: row["Zone"],
+            reportedTime: reportedTime || null,
+            acknowledgedAt,
+            resolvedAt,
+            category: get("Category") || null,
+            priority,
+            rootCause: get("Root Cause") || null,
+            resolvedBy: get("Resolved By") || null,
+            deviceCount,
           });
         }
 
@@ -455,6 +394,8 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
                 newAssignedIssues.map((i) => ({
                   ...i,
                   reportedAt: i.reportedAt.toISOString(),
+                  acknowledgedAt: i.acknowledgedAt ? i.acknowledgedAt.toISOString() : null,
+                  resolvedAt: i.resolvedAt ? i.resolvedAt.toISOString() : null,
                 })),
               ),
             });
@@ -467,14 +408,27 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
               );
             }
 
-            const updatedIssues = _.orderBy(
-              [...assignedIssues, ...newAssignedIssues],
-              ["reportedAt"],
-              ["desc"],
-            );
-            onUpdateAssignedIssues(updatedIssues);
+            const result = await response.json().catch(() => ({}));
+
+            // Re-read from the server: rows that already existed were not inserted again, only enriched.
+            const reload = await fetch("/api/it-issues");
+            if (reload.ok) {
+              const data = await reload.json();
+              onUpdateAssignedIssues(
+                _.orderBy(data.map(hydrateITIssue), ["reportedAt"], ["desc"]),
+              );
+            } else {
+              onUpdateAssignedIssues(
+                _.orderBy([...assignedIssues, ...newAssignedIssues], ["reportedAt"], ["desc"]),
+              );
+            }
+
+            const inserted = result.inserted ?? newAssignedIssues.length;
+            const parts = [`${inserted} new`];
+            if (result.updated) parts.push(`${result.updated} existing updated with new details`);
+            if (result.skipped) parts.push(`${result.skipped} already present (skipped)`);
             setFeedback({
-              message: `Successfully imported and saved ${newAssignedIssues.length} assigned issues.`,
+              message: `Import complete: ${parts.join(", ")}.`,
               type: "success",
             });
           } catch (error) {
@@ -532,7 +486,7 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
 
   const availableMonths = useMemo(() => {
     const months = _.uniq(
-      assignedIssues.map((issue) => {
+      cleanIssues.map((issue) => {
         const d = issue.reportedAt;
         return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
       }),
@@ -540,7 +494,7 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
       .sort()
       .reverse();
     return months;
-  }, [assignedIssues]);
+  }, [cleanIssues]);
 
   return (
     <>
@@ -562,7 +516,7 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
                 onFileUpload={handleFileUpload}
                 onDownloadTemplate={handleDownloadTemplate}
                 onClearRecords={handleClearRecords}
-                assignedIssuesCount={assignedIssues.length}
+                assignedIssuesCount={cleanIssues.length}
               />
             )}
 
@@ -574,7 +528,7 @@ const ITResponseTimeline: React.FC<ITResponseTimelineProps> = ({
                   availableMonths={availableMonths}
                   selectedMonth={monthFilter}
                   onMonthChange={setMonthFilter}
-                  allIssues={assignedIssues}
+                  prevMonthSummary={prevMonthSummary}
                 />
               </div>
             )}

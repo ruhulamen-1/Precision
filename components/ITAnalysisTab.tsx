@@ -1,5 +1,6 @@
 import React, { useMemo, useRef, useState } from "react";
-import { ITAssignedIssue, User } from "../types";
+import { User } from "../types";
+import type { AnalysisData, PrevMonthSummary } from "../utils/itAnalytics";
 import _ from "lodash";
 import { useLoading } from "../contexts/LoadingContext";
 import { jsPDF } from "jspdf";
@@ -22,36 +23,7 @@ const formatDateDDMMMYYYY = (date: Date | string | null): string => {
   }
 };
 
-export interface AnalysisData {
-  totalAssignedIssues: number;
-  issueCount: number;
-  offlineCount: number;
-  zoneSummary: { zone: string; count: number; projects: string[] }[];
-  projectSummary: [string, number][];
-  top5CommonProblems: {
-    issue: string;
-    count: number;
-    latestProject: string;
-    latestDate: Date | null;
-    projectSpecificCount: number;
-  }[];
-  issueTimeline: {
-    issue: string;
-    projectName: string;
-    count: number;
-    timelines: { start: Date; end: Date }[];
-    totalActiveDays: number;
-    firstReported: Date | null;
-    lastReported: Date | null;
-    solutionDate: Date | string | null;
-    resolutionTimeInDays: number | null;
-  }[];
-  averageResolutionTime: number;
-  longestOpenIssue:
-    | { issue: string; projectName: string; resolutionTimeInDays: number | null }
-    | undefined;
-  mostFrequentIssue: { issue: string; projectName: string; count: number } | null;
-}
+export type { AnalysisData };
 
 interface ITAnalysisTabProps {
   analysisData: AnalysisData | null;
@@ -59,8 +31,8 @@ interface ITAnalysisTabProps {
   availableMonths: string[];
   selectedMonth: string;
   onMonthChange: (month: string) => void;
-  /** All issues across all months — used for cross-month comparison & carry-over detection */
-  allIssues?: ITAssignedIssue[];
+  /** Previous calendar month, computed like-for-like (see summarizePreviousMonth) */
+  prevMonthSummary?: PrevMonthSummary | null;
 }
 
 // Analysis Card component
@@ -114,7 +86,7 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
   availableMonths,
   selectedMonth,
   onMonthChange,
-  allIssues = [],
+  prevMonthSummary = null,
 }) => {
   const { showLoading, hideLoading } = useLoading();
   const [showAllIssues, setShowAllIssues] = useState(false);
@@ -123,31 +95,13 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
     currentUser.role === "super_admin" ||
     currentUser.role === "admin";
 
-  // ─── Previous month stats for cross-month comparison ───────────────────────
-  const prevMonthStats = useMemo(() => {
-    if (!selectedMonth || availableMonths.length < 2) return null;
-    const idx = availableMonths.indexOf(selectedMonth);
-    // availableMonths is sorted desc; previous = idx - 1 (older)
-    const prevMonth = availableMonths[idx + 1];
-    if (!prevMonth) return null;
-    const prev = allIssues.filter((i) => {
-      const m = `${i.reportedAt.getUTCFullYear()}-${String(i.reportedAt.getUTCMonth() + 1).padStart(2, "0")}`;
-      return m === prevMonth;
-    });
-    return {
-      month: prevMonth,
-      total: prev.length,
-      issueCount: prev.filter((i) => i.status === "Issue").length,
-      offlineCount: prev.filter((i) => i.status === "Offline").length,
-      projectCount: _.uniq(prev.map((i) => i.projectName)).length,
-    };
-  }, [selectedMonth, availableMonths, allIssues]);
+  const prevMonthStats = prevMonthSummary;
 
-  // ─── Resolution Time Distribution buckets ──────────────────────────────────
+  // ─── Resolution Time Distribution buckets (incidents closed in the period) ──
   const resolutionBuckets = useMemo(() => {
     if (!analysisData) return [];
     const resolved = analysisData.issueTimeline.filter(
-      (t) => typeof t.resolutionTimeInDays === "number" && t.solutionDate !== "Ongoing"
+      (t) => t.closedInPeriod && typeof t.resolutionTimeInDays === "number"
     );
     const buckets = [
       { label: "1 day", min: 0, max: 1, count: 0 },
@@ -165,79 +119,18 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
     return buckets.map((b) => ({ ...b, pct: Math.round((b.count / max) * 100) }));
   }, [analysisData]);
 
-  // ─── Carry-over issues: issues from selected month still active in next month ─
-  const carryOverIssues = useMemo(() => {
-    if (!analysisData || !selectedMonth) return [];
-    const idx = availableMonths.indexOf(selectedMonth);
-    const nextMonth = availableMonths[idx - 1]; // availableMonths desc → smaller idx = newer
-    if (!nextMonth) return [];
+  // Incidents still unresolved when the selected (already finished) period ended
+  const carryOverIssues = useMemo(
+    () => (analysisData ? analysisData.issueTimeline.filter((t) => t.isCarryOver) : []),
+    [analysisData],
+  );
 
-    // Issues in this month that are "Ongoing" OR whose lastReported date falls in nextMonth or later
-    return analysisData.issueTimeline.filter((t) => {
-      if (t.solutionDate === "Ongoing") return true;
-      // Also check: if lastReported is in a later month
-      if (t.lastReported) {
-        const lm = `${t.lastReported.getUTCFullYear()}-${String(t.lastReported.getUTCMonth() + 1).padStart(2, "0")}`;
-        if (lm > selectedMonth) return true;
-      }
-      return false;
-    });
-  }, [analysisData, selectedMonth, availableMonths]);
+  const sortedTimelineData = useMemo(
+    () => (analysisData ? _.orderBy(analysisData.issueTimeline, ["count"], ["desc"]) : []),
+    [analysisData],
+  );
 
-  // ─── sortedTimelineData (same logic as before + carry-over flag) ────────────
-  const sortedTimelineData = useMemo(() => {
-    if (!analysisData?.issueTimeline) return [];
-
-    const carryOverKeys = new Set(carryOverIssues.map((c) => `${c.issue}|${c.projectName}`));
-
-    const updatedTimeline = analysisData.issueTimeline.map((issue) => {
-      const uniqueDates = _.chain(issue.timelines)
-        .flatMap((tl) => {
-          const dates = [];
-          const current = new Date(tl.start);
-          while (current <= tl.end) {
-            dates.push(new Date(current));
-            current.setUTCDate(current.getUTCDate() + 1);
-          }
-          return dates;
-        })
-        .uniqBy((d) => d.getTime())
-        .value();
-
-      const timelines: { start: Date; end: Date }[] = [];
-      let totalActiveDays = 0;
-
-      if (uniqueDates.length > 0) {
-        let currentTimeline = { start: uniqueDates[0], end: uniqueDates[0] };
-        for (let i = 1; i < uniqueDates.length; i++) {
-          const prevDate = uniqueDates[i - 1];
-          const currentDate = uniqueDates[i];
-          const diffDays = (currentDate.getTime() - prevDate.getTime()) / (1000 * 3600 * 24);
-          if (diffDays === 1 || (prevDate.getUTCDay() === 4 && diffDays <= 3)) {
-            currentTimeline.end = currentDate;
-          } else {
-            timelines.push(currentTimeline);
-            currentTimeline = { start: currentDate, end: currentDate };
-          }
-        }
-        timelines.push(currentTimeline);
-        totalActiveDays = timelines.reduce((sum, tl) => {
-          const daysInRange = (tl.end.getTime() - tl.start.getTime()) / (1000 * 3600 * 24) + 1;
-          return sum + daysInRange;
-        }, 0);
-      }
-
-      const key = `${issue.issue}|${issue.projectName}`;
-      return {
-        ...issue,
-        totalActiveDays,
-        timelines,
-        isCarryOver: carryOverKeys.has(key),
-      };
-    });
-
-    return _.orderBy(updatedTimeline, ["count"], ["desc"]);
-  }, [analysisData?.issueTimeline, carryOverIssues]);
+  const fmtDays = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
 
   // ─── PDF handlers (unchanged logic, kept intact) ───────────────────────────
   const handleSaveAsPdf = () => {
@@ -284,21 +177,21 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
       doc.setFont("helvetica", "bold").setFontSize(14).setTextColor(55, 65, 81);
       doc.text(String(analysisData.totalAssignedIssues), margin + 5, lastY + 7);
       doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(100, 116, 139);
-      doc.text("Total Records", margin + 5, lastY + 11);
+      doc.text("Incidents", margin + 5, lastY + 11);
 
       doc.setFillColor(cardColors.issue[0], cardColors.issue[1], cardColors.issue[2]);
       doc.roundedRect(margin + cardWidth + 5, lastY, cardWidth, cardHeight, 3, 3, "F");
       doc.setFont("helvetica", "bold").setFontSize(14).setTextColor(55, 65, 81);
       doc.text(String(analysisData.issueCount), margin + cardWidth + 10, lastY + 7);
       doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(100, 116, 139);
-      doc.text("Issues Reported", margin + cardWidth + 10, lastY + 11);
+      doc.text("Issue Incidents", margin + cardWidth + 10, lastY + 11);
 
       doc.setFillColor(cardColors.offline[0], cardColors.offline[1], cardColors.offline[2]);
       doc.roundedRect(margin + (cardWidth + 5) * 2, lastY, cardWidth, cardHeight, 3, 3, "F");
       doc.setFont("helvetica", "bold").setFontSize(14).setTextColor(55, 65, 81);
       doc.text(String(analysisData.offlineCount), margin + (cardWidth + 5) * 2 + 5, lastY + 7);
       doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(100, 116, 139);
-      doc.text("Marked Offline", margin + (cardWidth + 5) * 2 + 5, lastY + 11);
+      doc.text("Offline Incidents", margin + (cardWidth + 5) * 2 + 5, lastY + 11);
 
       doc.setFillColor(cardColors.project[0], cardColors.project[1], cardColors.project[2]);
       doc.roundedRect(margin + (cardWidth + 5) * 3, lastY, cardWidth, cardHeight, 3, 3, "F");
@@ -389,11 +282,10 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
         ...tableOptions,
         head: [
           [{ content: "Unique Issue Timeline & Resolution", colSpan: 10, styles: { halign: "center" as any, fillColor: [224, 231, 255] } }],
-          ["SL", "Project", "Issue", "Occ.", "Raised On", "Active Days", "Resolution", "Res. Date", "Status", "Carry-Over"],
+          ["SL", "Project", "Issue", "Days Logged", "Raised On", "Span (days)", "Resolution", "Res. Date", "Status", "Carry-Over"],
         ],
         body: analysisData.issueTimeline.map((t, index) => {
-          const key = `${t.issue}|${t.projectName}`;
-          const isCO = carryOverIssues.some((c) => `${c.issue}|${c.projectName}` === key);
+          const isCO = t.isCarryOver;
           return [
             index + 1, t.projectName, t.issue, t.count,
             formatDateDDMMMYYYY(t.firstReported), t.totalActiveDays,
@@ -409,9 +301,7 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
           if (!analysisData || data.cell.section !== "body" || typeof data.row.index !== "number") return;
           const rowData = analysisData.issueTimeline[data.row.index];
           if (!rowData) return;
-          const key = `${rowData.issue}|${rowData.projectName}`;
-          const isCO = carryOverIssues.some((c) => `${c.issue}|${c.projectName}` === key);
-          if (isCO) {
+          if (rowData.isCarryOver) {
             data.cell.styles.fillColor = [254, 226, 226];
             data.cell.styles.textColor = [153, 27, 27];
             data.cell.styles.fontStyle = "bold";
@@ -478,15 +368,15 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
       const cardHeight = 12;
       doc.setFillColor(224, 231, 255).roundedRect(margin, lastY, cardWidth, cardHeight, 3, 3, "F");
       doc.setFont("helvetica", "bold").setFontSize(14).text(String(analysisData.totalAssignedIssues), margin + 5, lastY + 8);
-      doc.setFont("helvetica", "normal").setFontSize(8).text("Total Records", margin + 5, lastY + 11);
+      doc.setFont("helvetica", "normal").setFontSize(8).text("Incidents", margin + 5, lastY + 11);
 
       doc.setFillColor(254, 243, 199).roundedRect(margin + cardWidth + 5, lastY, cardWidth, cardHeight, 3, 3, "F");
       doc.setFont("helvetica", "bold").setFontSize(14).text(String(analysisData.issueCount), margin + cardWidth + 10, lastY + 8);
-      doc.setFont("helvetica", "normal").setFontSize(8).text("Issues Reported", margin + cardWidth + 10, lastY + 11);
+      doc.setFont("helvetica", "normal").setFontSize(8).text("Issue Incidents", margin + cardWidth + 10, lastY + 11);
 
       doc.setFillColor(209, 250, 229).roundedRect(margin + (cardWidth + 5) * 2, lastY, cardWidth, cardHeight, 3, 3, "F");
       doc.setFont("helvetica", "bold").setFontSize(14).text(String(analysisData.offlineCount), margin + (cardWidth + 5) * 2 + 5, lastY + 8);
-      doc.setFont("helvetica", "normal").setFontSize(8).text("Marked Offline", margin + (cardWidth + 5) * 2 + 5, lastY + 11);
+      doc.setFont("helvetica", "normal").setFontSize(8).text("Offline Incidents", margin + (cardWidth + 5) * 2 + 5, lastY + 11);
 
       doc.setFillColor(233, 213, 255).roundedRect(margin + (cardWidth + 5) * 3, lastY, cardWidth, cardHeight, 3, 3, "F");
       doc.setFont("helvetica", "bold").setFontSize(14).text(String(analysisData.projectSummary.length), margin + (cardWidth + 5) * 3 + 5, lastY + 8);
@@ -538,14 +428,14 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
       doc.text("Timeline Highlights", margin, lastY);
       lastY += 6;
       doc.setFillColor(241, 245, 249).roundedRect(margin, lastY, cardWidth, cardHeight, 3, 3, "F");
-      doc.setFont("helvetica", "bold").setFontSize(14).text(`${analysisData.averageResolutionTime.toFixed(1)} Days`, margin + 5, lastY + 8);
-      doc.setFont("helvetica", "normal").setFontSize(8).text("Avg. Time to Resolve", margin + 5, lastY + 11);
+      doc.setFont("helvetica", "bold").setFontSize(14).text(analysisData.resolution.n ? `${fmtDays(analysisData.resolution.median)} Days` : "N/A", margin + 5, lastY + 8);
+      doc.setFont("helvetica", "normal").setFontSize(8).text(`Median Time to Resolve (n=${analysisData.resolution.n})`, margin + 5, lastY + 11);
       doc.setFillColor(241, 245, 249).roundedRect(margin + cardWidth + 5, lastY, cardWidth, cardHeight, 3, 3, "F");
       doc.setFont("helvetica", "bold").setFontSize(9).text(_.truncate(analysisData.longestOpenIssue?.issue || "N/A", { length: 25 }), margin + cardWidth + 10, lastY + 8);
       doc.setFont("helvetica", "normal").setFontSize(8).text(`Longest Open Issue (${analysisData.longestOpenIssue?.resolutionTimeInDays || 0} days)`, margin + cardWidth + 10, lastY + 11);
       doc.setFillColor(241, 245, 249).roundedRect(margin + (cardWidth + 5) * 2, lastY, cardWidth, cardHeight, 3, 3, "F");
       doc.setFont("helvetica", "bold").setFontSize(9).text(_.truncate(analysisData.mostFrequentIssue?.issue || "N/A", { length: 25 }), margin + (cardWidth + 5) * 2 + 5, lastY + 8);
-      doc.setFont("helvetica", "normal").setFontSize(8).text(`Most Frequent Issue (${analysisData.mostFrequentIssue?.count || 0} times)`, margin + (cardWidth + 5) * 2 + 5, lastY + 11);
+      doc.setFont("helvetica", "normal").setFontSize(8).text(`Most Frequent Issue (${analysisData.mostFrequentIssue?.count || 0} incidents)`, margin + (cardWidth + 5) * 2 + 5, lastY + 11);
       lastY += cardHeight + 10;
 
       // Carry-over notice in PDF
@@ -570,9 +460,7 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
 
       const getTimelineBody = (data: typeof timelineData) =>
         data.map((t) => {
-          const key = `${t.issue}|${t.projectName}`;
-          const isCO = carryOverIssues.some((c) => `${c.issue}|${c.projectName}` === key);
-          return [t.projectName, t.issue, t.count, t.solutionDate === "Ongoing" ? "Ongoing" : "Resolved", isCO ? "Yes" : "-"];
+          return [t.projectName, t.issue, t.count, t.solutionDate === "Ongoing" ? "Ongoing" : "Resolved", t.isCarryOver ? "Yes" : "-"];
         });
 
       if (timelineCol1.length > 0) {
@@ -647,8 +535,7 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
           </svg>
           <div>
             <p className="text-sm font-bold text-red-800">
-              {carryOverIssues.length} issue{carryOverIssues.length > 1 ? "s" : ""} from this month{" "}
-              {carryOverIssues.length > 1 ? "are" : "is"} still active / carried over to the next month
+              {carryOverIssues.length} incident{carryOverIssues.length > 1 ? "s" : ""} {carryOverIssues.length > 1 ? "were" : "was"} still unresolved at the end of this period (carried over)
             </p>
             <p className="text-xs text-red-600 mt-0.5">
               {carryOverIssues.map((c) => c.issue).join(" · ")}
@@ -671,8 +558,9 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
                   <p className="text-2xl font-bold text-slate-900">{analysisData.totalAssignedIssues}</p>
                   {prevMonthStats && <ChangeBadge current={analysisData.totalAssignedIssues} previous={prevMonthStats.total} />}
                 </div>
-                <p className="text-[10px] uppercase font-bold text-slate-400">Total Records</p>
-                {prevMonthStats && <p className="text-[10px] text-slate-400 mt-0.5">prev: {prevMonthStats.total}</p>}
+                <p className="text-[10px] uppercase font-bold text-slate-400">Incidents</p>
+                <p className="text-[10px] text-slate-400 mt-0.5" title="Rows logged across all days; one long incident adds one per day">{analysisData.issueDays} issue-days</p>
+                {prevMonthStats && <p className="text-[10px] text-slate-400">prev{prevMonthStats.sameDayLimit ? ` (1–${prevMonthStats.sameDayLimit})` : ""}: {prevMonthStats.total}</p>}
               </div>
             </div>
             {/* Issues Reported */}
@@ -685,7 +573,7 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
                   <p className="text-2xl font-bold text-slate-900">{analysisData.issueCount}</p>
                   {prevMonthStats && <ChangeBadge current={analysisData.issueCount} previous={prevMonthStats.issueCount} />}
                 </div>
-                <p className="text-[10px] uppercase font-bold text-slate-400">Issues Reported</p>
+                <p className="text-[10px] uppercase font-bold text-slate-400">Issue Incidents</p>
                 {prevMonthStats && <p className="text-[10px] text-slate-400 mt-0.5">prev: {prevMonthStats.issueCount}</p>}
               </div>
             </div>
@@ -699,7 +587,7 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
                   <p className="text-2xl font-bold text-slate-900">{analysisData.offlineCount}</p>
                   {prevMonthStats && <ChangeBadge current={analysisData.offlineCount} previous={prevMonthStats.offlineCount} />}
                 </div>
-                <p className="text-[10px] uppercase font-bold text-slate-400">Marked Offline</p>
+                <p className="text-[10px] uppercase font-bold text-slate-400">Offline Incidents</p>
                 {prevMonthStats && <p className="text-[10px] text-slate-400 mt-0.5">prev: {prevMonthStats.offlineCount}</p>}
               </div>
             </div>
@@ -720,15 +608,59 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
           </div>
         </div>
 
+        {/* ── Data quality & lifecycle KPIs ───────────────────────────────────── */}
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+            <span>Data as of <b className="text-slate-700">{formatDateDDMMMYYYY(analysisData.asOf)}</b></span>
+            <span title="Share of resolved incidents whose resolution date came from a 'Resolved At' value instead of being inferred from the last day the issue was logged">
+              Resolution dates recorded: <b className={analysisData.dataQuality.recordedResolutionShare >= 0.8 ? "text-green-700" : "text-amber-700"}>{Math.round(analysisData.dataQuality.recordedResolutionShare * 100)}%</b>
+              {analysisData.closedCount > 0 && analysisData.dataQuality.recordedResolutionShare < 1 && " (rest inferred from daily log)"}
+            </span>
+            {analysisData.dataQuality.duplicatesRemoved > 0 && (
+              <span className="text-amber-700">{analysisData.dataQuality.duplicatesRemoved} duplicate row(s) ignored</span>
+            )}
+            {analysisData.dataQuality.incidentsWithoutCategory > 0 && (
+              <span>{analysisData.dataQuality.incidentsWithoutCategory} incident(s) without a category</span>
+            )}
+            {prevMonthStats?.sameDayLimit && (
+              <span>Compared with the same first {prevMonthStats.sameDayLimit} day(s) of the previous month</span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
+            {[
+              { label: "New", value: analysisData.newCount, hint: "Started in this period" },
+              { label: "Carried in", value: analysisData.carriedInCount, hint: "Started before, still active" },
+              { label: "Resolved", value: analysisData.closedCount, hint: "Closed in this period", prev: prevMonthStats?.closedCount },
+              { label: "Open backlog", value: analysisData.backlogCount, hint: "Unresolved at period end" },
+              { label: "Repeat", value: analysisData.repeatCount, hint: "Same issue & project again within 30 days" },
+              {
+                label: "First response",
+                value: analysisData.firstResponse.n ? `${fmtDays(analysisData.firstResponse.median)}h` : "N/A",
+                hint: analysisData.firstResponse.n ? `median, n=${analysisData.firstResponse.n}, P90 ${fmtDays(analysisData.firstResponse.p90)}h` : "Needs Reported Time + Acknowledged At",
+              },
+            ].map((k) => (
+              <div key={k.label} className="bg-white/60 p-3 rounded-xl border border-white shadow-sm" title={k.hint}>
+                <p className="text-xl font-bold text-slate-900">{k.value}</p>
+                <p className="text-[10px] uppercase font-bold text-slate-400">{k.label}</p>
+                <p className="text-[10px] text-slate-400 mt-0.5 truncate">{k.hint}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
         {/* ── Breakdown & Top Problems ────────────────────────────────────────── */}
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          <AnalysisCard title="Zone Breakdown" className="lg:col-span-2">
+          <AnalysisCard title="Zone Breakdown (incidents)" className="lg:col-span-2">
             <div className="space-y-4">
-              {analysisData.zoneSummary.map(({ zone, count, projects }) => (
+              {analysisData.zoneSummary.map(({ zone, count, projects, devices, per100 }) => (
                 <div key={zone}>
                   <div className="flex justify-between text-sm mb-1">
                     <span className="font-semibold text-slate-700">{zone}</span>
-                    <span className="text-slate-500 font-bold">{count}</span>
+                    <span className="text-slate-500 font-bold">
+                      {count}
+                      {per100 !== null && <span className="ml-2 text-[10px] font-semibold text-slate-400" title={`${devices} devices in this zone`}>{per100.toFixed(1)} / 100 devices</span>}
+                    </span>
                   </div>
                   <div className="w-full bg-slate-200 rounded-full h-2.5 mb-1.5">
                     <div className="bg-gradient-to-r from-orange-400 to-red-500 h-2.5 rounded-full" style={{ width: `${(count / analysisData.totalAssignedIssues) * 100}%` }}></div>
@@ -744,7 +676,7 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
             </div>
           </AnalysisCard>
 
-          <AnalysisCard title="Top 5 Common Problems" className="lg:col-span-2">
+          <AnalysisCard title="Top 5 Common Problems (by number of incidents)" className="lg:col-span-2">
             <ol className="space-y-3 list-none">
               {analysisData.top5CommonProblems.map((p, index) => (
                 <li key={p.issue} className="flex items-start gap-4 p-3 rounded-lg hover:bg-slate-50 transition-colors">
@@ -754,7 +686,7 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
                     <div className="flex items-baseline text-xs text-slate-500 mt-1">
                       <p className="truncate pr-2">
                         Project: <span className="font-semibold text-slate-600" title={p.latestProject}>{p.latestProject}</span>
-                        <span className="font-bold ml-1.5">(<span className={getCountColorClass(p.projectSpecificCount)}>{p.projectSpecificCount}</span><span className="text-slate-400"> / {p.count} total</span>)</span>
+                        <span className="font-bold ml-1.5">(<span className={getCountColorClass(p.projectSpecificCount)}>{p.projectSpecificCount}</span><span className="text-slate-400"> / {p.count} incidents, {p.issueDays} issue-days</span>)</span>
                       </p>
                       <p className="ml-auto pl-2 whitespace-nowrap">Date: <span className="font-semibold text-slate-600">{formatDateDDMMMYYYY(p.latestDate)}</span></p>
                     </div>
@@ -798,20 +730,107 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
           <AnalysisCard title="Timeline Highlights" className="lg:col-span-4">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-center">
               <div className="bg-slate-100 p-3 rounded-lg">
-                <p className="text-xs text-slate-500 font-semibold">Avg. Time to Resolve</p>
-                <p className="font-bold text-slate-800 text-2xl mt-1">{analysisData.averageResolutionTime.toFixed(1)} Days</p>
+                <p className="text-xs text-slate-500 font-semibold">Time to Resolve (median)</p>
+                {analysisData.resolution.n > 0 ? (
+                  <>
+                    <p className="font-bold text-slate-800 text-2xl mt-1">{fmtDays(analysisData.resolution.median)} Days</p>
+                    <p className="text-xs text-slate-600">P90 {fmtDays(analysisData.resolution.p90)}d · mean {fmtDays(analysisData.resolution.mean)}d · n={analysisData.resolution.n}</p>
+                    <p className="text-[10px] text-slate-400 mt-0.5">Resolved incidents only; {analysisData.backlogCount} still open are not included</p>
+                  </>
+                ) : (
+                  <p className="font-bold text-slate-400 text-lg mt-1">No resolved incidents</p>
+                )}
               </div>
               <div className="bg-slate-100 p-3 rounded-lg">
-                <p className="text-xs text-slate-500 font-semibold">Longest Open Issue</p>
+                <p className="text-xs text-slate-500 font-semibold">Oldest Open Incident</p>
                 <p className="font-bold text-slate-800 text-lg mt-1 truncate" title={analysisData.longestOpenIssue?.issue || "N/A"}>{analysisData.longestOpenIssue?.issue || "N/A"}</p>
                 <p className="text-sm text-slate-600">({analysisData.longestOpenIssue?.resolutionTimeInDays || 0} days at {analysisData.longestOpenIssue?.projectName || "N/A"})</p>
               </div>
               <div className="bg-slate-100 p-3 rounded-lg">
                 <p className="text-xs text-slate-500 font-semibold">Most Frequent Issue</p>
                 <p className="font-bold text-slate-800 text-lg mt-1 truncate" title={analysisData.mostFrequentIssue?.issue || "N/A"}>{analysisData.mostFrequentIssue?.issue || "N/A"}</p>
-                <p className="text-sm text-slate-600">({analysisData.mostFrequentIssue?.count || 0} times)</p>
+                <p className="text-sm text-slate-600">({analysisData.mostFrequentIssue?.count || 0} incidents)</p>
               </div>
             </div>
+          </AnalysisCard>
+
+          {/* ── Open backlog (oldest first) ─────────────────────────────────── */}
+          <AnalysisCard title={`Open Backlog at Period End (${analysisData.backlogCount})`} className="lg:col-span-4">
+            {analysisData.backlog.length === 0 ? (
+              <p className="text-slate-500 text-center py-2">No unresolved incidents.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-100">
+                    <tr>
+                      {["Project", "Zone", "Issue", "Priority", "Assigned To", "Open Since", "Age (days)"].map((h) => (
+                        <th key={h} className="px-3 py-2 text-left text-xs font-medium text-slate-500 uppercase">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-slate-200">
+                    {analysisData.backlog.slice(0, 15).map((b) => (
+                      <tr key={b.id}>
+                        <td className="px-3 py-2 font-medium text-slate-800">{b.projectName}</td>
+                        <td className="px-3 py-2 text-slate-600">{b.zone}</td>
+                        <td className="px-3 py-2 text-slate-600">{b.issue}</td>
+                        <td className="px-3 py-2 text-slate-600">{b.priority || "—"}</td>
+                        <td className="px-3 py-2 text-slate-600">{b.assignedTo}</td>
+                        <td className="px-3 py-2 whitespace-nowrap text-slate-600">{formatDateDDMMMYYYY(b.start)}</td>
+                        <td className={`px-3 py-2 font-bold ${b.ageDays >= 15 ? "text-red-600" : b.ageDays >= 8 ? "text-orange-600" : "text-slate-700"}`}>{b.ageDays}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {analysisData.backlog.length > 15 && (
+                  <p className="text-[10px] text-slate-400 pt-2">Showing the 15 oldest of {analysisData.backlog.length}.</p>
+                )}
+              </div>
+            )}
+          </AnalysisCard>
+
+          {/* ── Workload by engineer / category ─────────────────────────────── */}
+          <AnalysisCard title="Workload by Assignee" className="lg:col-span-2">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="text-xs text-slate-500 uppercase">
+                  <th className="text-left py-1">Assignee</th>
+                  <th className="text-right py-1">Incidents</th>
+                  <th className="text-right py-1">Resolved</th>
+                  <th className="text-right py-1" title="Median days to resolve">Median days</th>
+                </tr>
+              </thead>
+              <tbody>
+                {analysisData.byAssignee.map((a) => (
+                  <tr key={a.assignedTo} className="border-t border-slate-100">
+                    <td className="py-1 text-slate-700">{a.assignedTo}</td>
+                    <td className="py-1 text-right font-bold text-slate-700">{a.incidents}</td>
+                    <td className="py-1 text-right text-slate-600">{a.closed}</td>
+                    <td className="py-1 text-right text-slate-600">{a.medianDays === null ? "—" : fmtDays(a.medianDays)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </AnalysisCard>
+
+          <AnalysisCard title="Incidents by Category" className="lg:col-span-2">
+            {analysisData.byCategory.length === 0 ? (
+              <p className="text-slate-500 text-center py-2">No category data. Add a "Category" column to the CSV to see what is causing the incidents.</p>
+            ) : (
+              <div className="space-y-2">
+                {analysisData.byCategory.map((c) => (
+                  <div key={c.category}>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-slate-700">{c.category}</span>
+                      <span className="font-bold text-slate-600">{c.count}</span>
+                    </div>
+                    <div className="w-full bg-slate-200 rounded-full h-2">
+                      <div className="bg-indigo-400 h-2 rounded-full" style={{ width: `${(c.count / analysisData.totalAssignedIssues) * 100}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </AnalysisCard>
 
           {/* ── Resolution Time Distribution (NEW) ─────────────────────────── */}
@@ -839,13 +858,13 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
                     <span className="w-8 text-xs text-slate-400 flex-shrink-0">{b.count > 0 ? `${b.count}` : ""}</span>
                   </div>
                 ))}
-                <p className="text-[10px] text-slate-400 pt-1">Based on {resolutionBuckets.reduce((s, b) => s + b.count, 0)} resolved unique issues</p>
+                <p className="text-[10px] text-slate-400 pt-1">Based on {resolutionBuckets.reduce((s, b) => s + b.count, 0)} incidents resolved in this period</p>
               </div>
             )}
           </AnalysisCard>
 
           {/* ── Unique Issue Timeline with Gantt bar + Carry-Over flag ─────── */}
-          <AnalysisCard title="Unique Issue Timeline & Resolution" className="lg:col-span-4">
+          <AnalysisCard title="Incident Timeline & Resolution" className="lg:col-span-4">
             {(() => {
               if (sortedTimelineData.length === 0) {
                 return <div className="text-center py-8 text-slate-500">No issues to display.</div>;
@@ -865,10 +884,10 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
               if (displayedTimelineData.length === 0 && !showAllIssues) {
                 return (
                   <div className="text-center py-8 text-slate-500">
-                    <p>No issues occurred more than once.</p>
+                    <p>No incident lasted more than one logged day.</p>
                     {hasInfrequentIssues && (
                       <button onClick={() => setShowAllIssues(true)} className="mt-4 px-4 py-2 text-sm font-medium text-orange-600 bg-orange-100 rounded-md hover:bg-orange-200 transition-colors">
-                        View All {sortedTimelineData.length} Unique Issues
+                        View All {sortedTimelineData.length} Incidents
                       </button>
                     )}
                   </div>
@@ -880,7 +899,7 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
                   {hasInfrequentIssues && (
                     <div className="flex justify-end mb-4">
                       <button onClick={() => setShowAllIssues((prev) => !prev)} className="px-4 py-2 text-sm font-medium text-orange-600 bg-orange-100 rounded-md hover:bg-orange-200 transition-colors">
-                        {showAllIssues ? "Show Only Frequent Issues (2+)" : `View All (${sortedTimelineData.length}) Issues`}
+                        {showAllIssues ? "Show Only Multi-day Incidents" : `View All (${sortedTimelineData.length}) Incidents`}
                       </button>
                     </div>
                   )}
@@ -891,9 +910,9 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
                           <th className="px-3 py-2 text-left text-xs font-medium text-slate-500 uppercase">SL</th>
                           <th className="px-3 py-2 text-left text-xs font-medium text-slate-500 uppercase">Project</th>
                           <th className="px-3 py-2 text-left text-xs font-medium text-slate-500 uppercase">Issue</th>
-                          <th className="px-3 py-2 text-center text-xs font-medium text-slate-500 uppercase">Occ.</th>
+                          <th className="px-3 py-2 text-center text-xs font-medium text-slate-500 uppercase">Days Logged</th>
                           <th className="px-3 py-2 text-left text-xs font-medium text-slate-500 uppercase">Raised On</th>
-                          <th className="px-3 py-2 text-center text-xs font-medium text-slate-500 uppercase">Active Days</th>
+                          <th className="px-3 py-2 text-center text-xs font-medium text-slate-500 uppercase">Span (days)</th>
                           <th className="px-3 py-2 text-left text-xs font-medium text-slate-500 uppercase">Resolution</th>
                           <th className="px-3 py-2 text-left text-xs font-medium text-slate-500 uppercase">Res. Date</th>
                           <th className="px-3 py-2 text-left text-xs font-medium text-slate-500 uppercase">Status</th>
@@ -933,6 +952,9 @@ const ITAnalysisTab: React.FC<ITAnalysisTabProps> = ({
                               <td className="px-3 py-2 text-center text-sm text-slate-600">{issue.totalActiveDays}</td>
                               <td className="px-3 py-2 whitespace-nowrap text-sm text-slate-600">
                                 {issue.resolutionTimeInDays !== null ? `${issue.resolutionTimeInDays} day(s)` : "N/A"}
+                                {issue.resolutionSource && (
+                                  <span className="ml-1 text-[9px] uppercase text-slate-400" title={issue.resolutionSource === "recorded" ? "From the 'Resolved At' column" : "Inferred: last day the issue appeared in the daily log"}>{issue.resolutionSource === "recorded" ? "rec." : "est."}</span>
+                                )}
                               </td>
                               <td className="px-3 py-2 whitespace-nowrap text-sm text-slate-600">
                                 {isOngoing ? "N/A" : formatDateDDMMMYYYY(issue.solutionDate)}

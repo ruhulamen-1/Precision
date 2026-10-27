@@ -353,6 +353,22 @@ async function startServer() {
         )
       `);
 
+      // Lifecycle / classification fields used by the IT response analytics.
+      // DATETIME (not TIMESTAMP) so values are stored exactly as written, with no timezone shift.
+      for (const ddl of [
+        'ALTER TABLE it_assigned_issues ADD COLUMN IF NOT EXISTS reported_time VARCHAR(5) NULL',
+        'ALTER TABLE it_assigned_issues ADD COLUMN IF NOT EXISTS acknowledged_at DATETIME NULL',
+        'ALTER TABLE it_assigned_issues ADD COLUMN IF NOT EXISTS resolved_at DATETIME NULL',
+        'ALTER TABLE it_assigned_issues ADD COLUMN IF NOT EXISTS category VARCHAR(100) NULL',
+        'ALTER TABLE it_assigned_issues ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NULL',
+        'ALTER TABLE it_assigned_issues ADD COLUMN IF NOT EXISTS root_cause TEXT NULL',
+        'ALTER TABLE it_assigned_issues ADD COLUMN IF NOT EXISTS resolved_by VARCHAR(255) NULL',
+        'ALTER TABLE it_assigned_issues ADD COLUMN IF NOT EXISTS device_count INT NULL',
+        'ALTER TABLE it_assigned_issues ADD INDEX IF NOT EXISTS idx_it_issue_lookup (reported_at, project_name)',
+      ]) {
+        try { await connection.query(ddl); } catch (e) { /* already applied */ }
+      }
+
       await connection.query(`
         CREATE TABLE IF NOT EXISTS it_device_credentials (
           id INT AUTO_INCREMENT PRIMARY KEY,
@@ -3053,7 +3069,14 @@ async function startServer() {
       if (useMemoryStore || !pool) {
         return res.json(localData.itIssues);
       }
-      const [rows] = await pool.query('SELECT id as db_id, issue_id as id, issue_text as issue, DATE_FORMAT(reported_at, "%Y-%m-%dT%H:%i:%s.000Z") as reportedAt, assigned_to as assignedTo, status, project_name as projectName, zone, created_at FROM it_assigned_issues ORDER BY reported_at DESC');
+      const [rows] = await pool.query(`SELECT id as db_id, issue_id as id, issue_text as issue,
+          DATE_FORMAT(reported_at, "%Y-%m-%dT%H:%i:%s.000Z") as reportedAt, assigned_to as assignedTo, status,
+          project_name as projectName, zone, created_at,
+          reported_time as reportedTime,
+          DATE_FORMAT(acknowledged_at, "%Y-%m-%dT%H:%i:%s.000Z") as acknowledgedAt,
+          DATE_FORMAT(resolved_at, "%Y-%m-%dT%H:%i:%s.000Z") as resolvedAt,
+          category, priority, root_cause as rootCause, resolved_by as resolvedBy, device_count as deviceCount
+        FROM it_assigned_issues ORDER BY reported_at DESC`);
       res.json(rows);
     } catch (error) {
       console.error('Error fetching IT issues:', error);
@@ -3061,45 +3084,125 @@ async function startServer() {
     }
   });
 
+  // Imports daily IT issue rows. Rows already stored (same day + project + issue text) are not
+  // inserted again; instead any lifecycle fields supplied for them (acknowledged/resolved/category/…)
+  // are filled in, so a CSV can be re-uploaded later to enrich earlier records.
+  const normIssueText = (v: any) =>
+    String(v ?? '').toLowerCase().replace(/\s+/g, ' ').trim().replace(/[.,;:!?]+$/, '').trim();
+  const itRowKey = (day: string, project: any, issue: any) => `${day}|${normIssueText(project)}|${normIssueText(issue)}`;
+  // 'YYYY-MM-DD HH:MM:SS' straight from the ISO string, so no server-timezone conversion happens
+  const toSqlDateTime = (iso: any): string | null => {
+    if (!iso) return null;
+    const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)/.exec(String(iso));
+    if (!m) return null;
+    return `${m[1]} ${m[2].length === 5 ? m[2] + ':00' : m[2]}`;
+  };
+  const ENRICH_FIELDS = ['reportedTime', 'acknowledgedAt', 'resolvedAt', 'category', 'priority', 'rootCause', 'resolvedBy', 'deviceCount'] as const;
+  const hasEnrichment = (i: any) => ENRICH_FIELDS.some(f => i[f] !== undefined && i[f] !== null && i[f] !== '');
+
   apiRouter.post('/it-issues/bulk', async (req, res) => {
     const issues = req.body;
     if (!Array.isArray(issues)) {
       return res.status(400).json({ error: 'Invalid data format' });
     }
 
+    // collapse duplicates inside the uploaded file itself (first row wins, gaps filled from later ones)
+    const batch = new Map<string, any>();
+    for (const i of issues) {
+      const day = String(i.reportedAt || '').slice(0, 10);
+      const key = itRowKey(day, i.projectName, i.issue);
+      const prev = batch.get(key);
+      if (!prev) { batch.set(key, { ...i }); continue; }
+      for (const f of ENRICH_FIELDS) {
+        if ((prev[f] === undefined || prev[f] === null || prev[f] === '') && i[f]) prev[f] = i[f];
+      }
+    }
+    const incoming = Array.from(batch.entries());
+
     if (useMemoryStore || !pool) {
-      const newIssues = issues.map((i: any, index: number) => ({
-        local_id: localData.itIssues.length + index + 1,
-        ...i,
-        created_at: new Date()
-      }));
-      localData.itIssues = [...localData.itIssues, ...newIssues];
+      const existing = new Map<string, any>();
+      localData.itIssues.forEach((r: any) => existing.set(itRowKey(String(r.reportedAt || '').slice(0, 10), r.projectName, r.issue), r));
+      let inserted = 0, updated = 0, skipped = 0;
+      for (const [key, row] of incoming) {
+        const found = existing.get(key);
+        if (!found) {
+          localData.itIssues.push({ local_id: localData.itIssues.length + 1, ...row, created_at: new Date() });
+          inserted++;
+        } else if (hasEnrichment(row)) {
+          ENRICH_FIELDS.forEach(f => { if (row[f] !== undefined && row[f] !== null && row[f] !== '') found[f] = row[f]; });
+          updated++;
+        } else {
+          skipped++;
+        }
+      }
       saveLocalData(localData);
-      return res.json({ message: 'Success (Saved to Memory)', count: newIssues.length });
+      return res.json({ message: 'Success (Saved to Memory)', count: inserted, inserted, updated, skipped });
     }
 
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
-      const query = `
-        INSERT INTO it_assigned_issues 
-        (issue_id, issue_text, reported_at, assigned_to, status, project_name, zone) 
-        VALUES ?
-      `;
-      const values = issues.map(i => [
-        i.id,
-        i.issue,
-        new Date(i.reportedAt),
-        i.assignedTo,
-        i.status,
-        i.projectName,
-        i.zone
-      ]);
-      if (values.length > 0) {
-        await connection.query(query, [values]);
+
+      const days = incoming.map(([k]) => k.split('|')[0]).filter(Boolean).sort();
+      const existing = new Map<string, number>();
+      if (days.length > 0) {
+        const [existingRows]: any = await connection.query(
+          `SELECT id, issue_text, project_name, DATE_FORMAT(reported_at, '%Y-%m-%d') AS d
+             FROM it_assigned_issues WHERE reported_at >= ? AND reported_at < DATE_ADD(?, INTERVAL 1 DAY)`,
+          [`${days[0]} 00:00:00`, days[days.length - 1]],
+        );
+        for (const r of existingRows) {
+          const k = itRowKey(r.d, r.project_name, r.issue_text);
+          if (!existing.has(k)) existing.set(k, r.id);
+        }
+      }
+
+      const toInsert: any[][] = [];
+      let updated = 0, skipped = 0;
+      for (const [key, i] of incoming) {
+        const existingId = existing.get(key);
+        const device = i.deviceCount === undefined || i.deviceCount === null || i.deviceCount === '' ? null : Number(i.deviceCount);
+        const fields = [
+          i.reportedTime || null,
+          toSqlDateTime(i.acknowledgedAt),
+          toSqlDateTime(i.resolvedAt),
+          i.category || null,
+          i.priority || null,
+          i.rootCause || null,
+          i.resolvedBy || null,
+          Number.isFinite(device) ? device : null,
+        ];
+        if (existingId === undefined) {
+          toInsert.push([
+            i.id, i.issue, toSqlDateTime(i.reportedAt), i.assignedTo, i.status, i.projectName, i.zone, ...fields,
+          ]);
+        } else if (hasEnrichment(i)) {
+          await connection.query(
+            `UPDATE it_assigned_issues SET
+               reported_time = COALESCE(?, reported_time), acknowledged_at = COALESCE(?, acknowledged_at),
+               resolved_at = COALESCE(?, resolved_at), category = COALESCE(?, category),
+               priority = COALESCE(?, priority), root_cause = COALESCE(?, root_cause),
+               resolved_by = COALESCE(?, resolved_by), device_count = COALESCE(?, device_count)
+             WHERE id = ?`,
+            [...fields, existingId],
+          );
+          updated++;
+        } else {
+          skipped++;
+        }
+      }
+
+      if (toInsert.length > 0) {
+        await connection.query(
+          `INSERT INTO it_assigned_issues
+             (issue_id, issue_text, reported_at, assigned_to, status, project_name, zone,
+              reported_time, acknowledged_at, resolved_at, category, priority, root_cause, resolved_by, device_count)
+           VALUES ?`,
+          [toInsert],
+        );
       }
       await connection.commit();
-      res.json({ message: 'Success', count: values.length });
+      res.json({ message: 'Success', count: toInsert.length, inserted: toInsert.length, updated, skipped });
     } catch (error) {
       await connection.rollback();
       console.error('Error saving IT issues:', error);

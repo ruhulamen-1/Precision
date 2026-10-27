@@ -12,6 +12,7 @@ import GlobalSpinner from './components/GlobalSpinner';
 import Footer from './components/Footer';
 import SplashScreen from './components/SplashScreen';
 import { getEffectivePermissions } from './utils/permissionUtils';
+import { hydrateITIssue } from './utils/itAnalytics';
 import { useTheme } from './hooks/useTheme';
 import { useTabNavigation } from './hooks/useTabNavigation';
 
@@ -355,10 +356,7 @@ function AppInner() {
                 if (response.ok && contentType && contentType.includes("application/json")) {
                     const data = await response.json();
                     // Maps string dates from DB back into Date objects
-                    const formattedData = data.map((item: any) => ({
-                        ...item,
-                        reportedAt: new Date(item.reportedAt)
-                    }));
+                    const formattedData = data.map(hydrateITIssue);
                     if (isMounted) setItAssignedIssues(formattedData);
                 } else {
                     if (isMounted) setItAssignedIssues([]);

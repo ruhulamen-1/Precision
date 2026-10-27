@@ -272,6 +272,18 @@ export interface ITAssignedIssue {
   status: 'Issue' | 'Offline';
   projectName: string;
   zone: string;
+  // Optional lifecycle / classification fields. When absent, the analysis falls
+  // back to inferring resolution from the daily log (see utils/itAnalytics.ts).
+  /** HH:MM wall-clock time the issue was first reported on `reportedAt`'s date */
+  reportedTime?: string | null;
+  acknowledgedAt?: Date | null;
+  resolvedAt?: Date | null;
+  category?: string | null;
+  priority?: 'High' | 'Medium' | 'Low' | null;
+  rootCause?: string | null;
+  resolvedBy?: string | null;
+  /** Number of devices/cameras at the project — denominator for incident rates */
+  deviceCount?: number | null;
 }
 
 export interface CameraStatusEntry {

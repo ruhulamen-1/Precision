@@ -211,12 +211,21 @@ const ITRecordsTab: React.FC<ITRecordsTabProps> = ({
                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
                   Assigned To
                 </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                  Category / Priority
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                  Acknowledged
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                  Resolved
+                </th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-slate-200">
               {filteredIssues.map((assignedIssue) => (
                 <tr
-                  key={assignedIssue.id}
+                  key={`${assignedIssue.id}-${assignedIssue.reportedAt.getTime()}-${assignedIssue.projectName}-${assignedIssue.issue}`}
                   className="hover:bg-slate-50 transition-colors"
                 >
                   <td className="px-4 py-4 whitespace-nowrap text-sm text-slate-500">
@@ -243,6 +252,15 @@ const ITRecordsTab: React.FC<ITRecordsTabProps> = ({
                   </td>
                   <td className="px-4 py-4 whitespace-nowrap text-sm text-slate-500">
                     {assignedIssue.assignedTo}
+                  </td>
+                  <td className="px-4 py-4 whitespace-nowrap text-sm text-slate-500">
+                    {[assignedIssue.category, assignedIssue.priority].filter(Boolean).join(" · ") || "—"}
+                  </td>
+                  <td className="px-4 py-4 whitespace-nowrap text-sm text-slate-500">
+                    {assignedIssue.acknowledgedAt ? formatDateDDMMMYYYY(assignedIssue.acknowledgedAt) : "—"}
+                  </td>
+                  <td className="px-4 py-4 whitespace-nowrap text-sm text-slate-500">
+                    {assignedIssue.resolvedAt ? formatDateDDMMMYYYY(assignedIssue.resolvedAt) : "—"}
                   </td>
                 </tr>
               ))}
